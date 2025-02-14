@@ -18,7 +18,7 @@ MIDAS consists of three main components:
 3. **ComfyUI**: Image generation backend (installed separately)
 
 ## Prerequisites
-- Python 3.8+
+- Python 3.10 or 3.11 (3.12 not yet fully supported)
 - Ollama
 - ComfyUI (Optional for image generation)
 
