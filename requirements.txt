@@ -2,6 +2,8 @@
 gradio==4.25.0
 requests==2.32.3
 sqlalchemy==2.0.29
+pydantic>=2.5.0
+pydantic-core>=2.14.0
 langchain==0.1.0
 langchain-community==0.0.16
 chromadb==0.4.22
