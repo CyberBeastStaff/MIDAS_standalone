@@ -1,4 +1,4 @@
-# MIDAS: Multi-Intelligent Digital Assistant System
+# MIDAS: Machine Intelligence Deployment and Automation System
 
 ## Overview
 MIDAS is an advanced AI-powered chatbot and image generation application that provides a seamless, interactive experience with multiple AI models and capabilities.
@@ -19,7 +19,7 @@ MIDAS is an advanced AI-powered chatbot and image generation application that pr
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/MIDAS.git
+git clone https://github.com/CyberBeastStaff/MIDAS_standalone.git
 cd MIDAS
 ```
 
@@ -37,8 +37,9 @@ pip install -r requirements.txt
 ### 4. Configure Ollama
 Ensure Ollama is installed and models are pulled:
 ```bash
-ollama pull llama2
+ollama pull phi3.5
 ollama pull mistral
+ollama pull llama3.1
 ```
 
 ### 5. (Optional) ComfyUI Setup
@@ -96,7 +97,7 @@ Futuristic robot --ar wide --style 3d --steps 50 --cfg 8.0
 5. Create a Pull Request
 
 ## License
-[Specify your license here]
+PENDING
 
 ## Contact
-[Your contact information]
+PENDING
