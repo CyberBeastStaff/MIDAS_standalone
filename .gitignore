@@ -41,12 +41,9 @@ logs/
 # *.db
 # *.sqlite3
 
-# ComfyUI Specific Exclusions
-ComfyUI/models/
-ComfyUI/output/
-ComfyUI/custom_nodes/
-ComfyUI/checkpoints/
-ComfyUI/configs/
+# ComfyUI
+ComfyUI/
+ComfyUI_temp/
 
 # Image Outputs
 conversations/

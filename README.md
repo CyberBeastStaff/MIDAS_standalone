@@ -10,12 +10,32 @@ MIDAS is an advanced AI-powered chatbot and image generation application that pr
 - Bot Configuration Management
 - Flexible Prompt Engineering
 
+## Components
+
+MIDAS consists of three main components:
+1. **MIDAS Interface**: Main application interface (included in this repository)
+2. **Ollama**: Local LLM server (installed separately)
+3. **ComfyUI**: Image generation backend (installed separately)
+
 ## Prerequisites
 - Python 3.8+
 - Ollama
 - ComfyUI (Optional for image generation)
 
 ## Installation
+
+### Required Dependencies
+
+Before installing MIDAS, ensure you have the following components installed:
+
+1. **Ollama**
+   - Windows/Mac: Download from [Ollama's website](https://ollama.ai)
+   - Required models: phi3.5, mistral, llama3.1
+
+2. **ComfyUI** (Not included in repository)
+   - Clone separately: `git clone https://github.com/comfyanonymous/ComfyUI.git`
+   - Install in the same parent directory as MIDAS
+   - Follow ComfyUI's installation guide for model setup
 
 ### Windows Installation
 ### 1. Clone the Repository
@@ -43,11 +63,27 @@ ollama pull mistral
 ollama pull llama3.1
 ```
 
-### 5. (Optional) ComfyUI Setup
-If using image generation:
-1. Clone ComfyUI
-2. Install ComfyUI dependencies
-3. Download SDXL models
+### 5. (Required) ComfyUI Setup
+```bash
+# Navigate to parent directory
+cd ..
+
+# Clone ComfyUI repository
+git clone https://github.com/comfyanonymous/ComfyUI.git
+
+# Setup ComfyUI
+cd ComfyUI
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Download required models
+## Manual download required:
+## 1. SDXL base model
+## 2. SDXL refiner model
+## Place them in ComfyUI/models/checkpoints/
+```
 
 ### macOS Installation
 
@@ -91,8 +127,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-#### Installing ComfyUI
+#### Installing ComfyUI (Required)
 ```bash
+# Navigate to parent directory
+cd ..
+
 # Clone ComfyUI
 git clone https://github.com/comfyanonymous/ComfyUI.git
 cd ComfyUI
@@ -106,6 +145,12 @@ pip install -r requirements.txt
 
 # For M1/M2/M3 Macs (Apple Silicon)
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu
+
+# Download required models
+## Manual download required:
+## 1. SDXL base model
+## 2. SDXL refiner model
+## Place them in ComfyUI/models/checkpoints/
 ```
 
 #### Starting Services on Mac
@@ -147,6 +192,20 @@ The script will:
   - Ensure all virtual environments are activated
   - Verify Ollama service is running
   - Monitor system resources
+
+## Directory Structure
+```
+Parent Directory
+├── MIDAS_standalone/    # This repository
+│   ├── app.py
+│   ├── requirements.txt
+│   └── start_services.sh/ps1
+│
+└── ComfyUI/            # Install separately
+    ├── main.py
+    └── models/
+        └── checkpoints/  # Place SDXL models here
+```
 
 ## Database
 The repository includes test databases with sample conversations and bot configurations. These can be used as initial data or reference for your setup.
