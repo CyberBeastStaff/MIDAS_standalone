@@ -3073,4 +3073,4 @@ if __name__ == "__main__":
     os.makedirs('bot_embeddings', exist_ok=True)
     
     # Start the Gradio interface
-    demo.queue().launch(server_name="0.0.0.0", share=False, allowed_paths=["."])
+    demo.queue().launch(server_name="0.0.0.0", share=False, allowed_paths=["."], favicon_path="favicon.ico")
