@@ -47,6 +47,16 @@ If using image generation:
 2. Install ComfyUI dependencies
 3. Download SDXL models
 
+## Database
+The repository includes test databases with sample conversations and bot configurations. These can be used as initial data or reference for your setup.
+
+### Included Databases
+- `conversations.db`: Conversation history
+- `bots.db`: Bot configurations
+- `documents.db`: Stored document references
+
+**Note**: You can replace or modify these databases as needed for your specific use case.
+
 ## Running the Application
 ```bash
 python app.py

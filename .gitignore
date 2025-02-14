@@ -37,9 +37,9 @@ env/
 *.log
 logs/
 
-# Databases
-*.db
-*.sqlite3
+# Databases are now included
+# *.db
+# *.sqlite3
 
 # ComfyUI Specific Exclusions
 ComfyUI/models/
