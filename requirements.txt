@@ -1,3 +1,4 @@
+# Core Dependencies
 gradio==4.25.0
 requests==2.32.3
 sqlalchemy==2.0.29
@@ -10,6 +11,8 @@ transformers>=4.36.2
 python-docx==1.1.0
 pypdf==4.0.1
 docx2txt==0.8
+
+# Machine Learning & Image Generation
 torch>=2.2.0
 numpy>=1.26.0
 pillow>=10.0.0
@@ -23,7 +26,13 @@ psutil>=5.9.0
 kornia>=0.7.1
 spandrel>=0.1.0
 sentencepiece>=0.1.99
-tokenizers>=0.13.3
-torchvision>=0.17.0
+
+# Additional Dependencies
+pandas>=2.2.0
+flask>=3.0.0
+ollama>=0.1.6
+python-dotenv>=1.0.0
 torchaudio>=2.2.0
+torchvision>=0.17.0
 torchsde>=0.2.6
+tokenizers>=0.13.3
