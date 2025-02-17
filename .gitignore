@@ -49,6 +49,9 @@ ComfyUI_temp/
 conversations/
 images/
 
+# Changelog (optional tracking)
+#CHANGELOG.md
+
 # OS Generated Files
 .DS_Store
 Thumbs.db

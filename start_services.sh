@@ -48,24 +48,15 @@ sleep 2
 # Start Ollama
 start_service "Ollama" "ollama serve > logs/ollama.log 2>&1" "ollama serve"
 
-# Start ComfyUI
-if [ -d "ComfyUI" ]; then
-    cd ComfyUI
-    if [ -d "venv" ]; then
-        source venv/bin/activate
-        start_service "ComfyUI" "python main.py > ../logs/comfyui.log 2>&1" "python.*main.py"
-        deactivate
-    else
-        log "ComfyUI virtual environment not found" "$RED"
-        exit 1
-    fi
-    cd ..
-else
-    log "ComfyUI directory not found" "$RED"
-    exit 1
-fi
+# Get the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
+# Start ComfyUI server
+cd "$SCRIPT_DIR/ComfyUI"
+start_service "ComfyUI" "python main.py > ../logs/comfyui.log 2>&1" "python.*main.py"
 
 # Start MIDAS
+cd "$SCRIPT_DIR"
 if [ -d "venv" ]; then
     source venv/bin/activate
     start_service "MIDAS" "python app.py > logs/midas.log 2>&1" "python.*app.py"

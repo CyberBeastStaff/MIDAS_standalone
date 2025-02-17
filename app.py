@@ -84,16 +84,25 @@ def init_db():
             )
         ''')
         
-        # Set default model if not exists
-        cursor.execute('''
-            INSERT OR IGNORE INTO settings (key, value) 
-            VALUES ('default_model', 'llama3.1:8b')
-        ''')
+        # Check if default model exists
+        cursor.execute('SELECT value FROM settings WHERE key = "default_model"')
+        result = cursor.fetchone()
+        
+        if not result:
+            # Set default model if not exists
+            cursor.execute('''
+                INSERT INTO settings (key, value) 
+                VALUES ('default_model', 'llama3.1:8b')
+            ''')
+            print("Initialized default model setting to llama3.1:8b")
+        else:
+            print(f"Using existing default model: {result[0]}")
         
         # Commit changes and close connection
         conn.commit()
     except Exception as e:
         print(f"Error initializing database: {e}")
+        traceback.print_exc()
     finally:
         conn.close()
 
@@ -577,11 +586,19 @@ def create_conversation(initial_message, model="llama3.1:8b"):
         conn = sqlite3.connect('conversations.db')
         cursor = conn.cursor()
         
-        # Create conversation with temporary title
+        # Special handling for image generation
+        if model == "SDXL":
+            # Generate a title based on the image prompt
+            title = generate_conversation_title(initial_message, "", model)
+        else:
+            # Default title for other conversations
+            title = "Untitled Conversation"
+        
+        # Create conversation with the generated title
         cursor.execute('''
             INSERT INTO conversations (title, last_used_model)
             VALUES (?, ?)
-        ''', ("Untitled Conversation", model))
+        ''', (title, model))
         
         conv_id = cursor.lastrowid
         conn.commit()
@@ -591,6 +608,7 @@ def create_conversation(initial_message, model="llama3.1:8b"):
         
     except Exception as e:
         print(f"Error creating conversation: {e}")
+        traceback.print_exc()
         return None
 
 def generate_conversation_title(message, response, model):
@@ -606,7 +624,64 @@ def generate_conversation_title(message, response, model):
         str: Generated title
     """
     try:
-        # Use the model to generate a title
+        # Special handling for image generation conversations
+        if model == "SDXL" or "image" in message.lower():
+            import re
+            
+            # Clean and normalize the message
+            clean_message = message.lower().strip()
+            clean_message = re.sub(r'^(generate|create|make)\s*(an?\s*)?image\s*(of|with)?', '', clean_message).strip()
+            clean_message = re.sub(r'--\w+\s*[^\s]+', '', clean_message).strip()
+            
+            # Use the default model to generate a more descriptive title
+            default_model = get_default_model()
+            
+            # Prepare messages for title generation
+            messages = [
+                {
+                    "role": "system",
+                    "content": """You are an expert at creating concise, informative titles. 
+                    Given an image generation prompt, create a title that:
+                    1. Captures the essence of the image
+                    2. Is no more than 5 words long
+                    3. Highlights the most important or unique aspect
+                    4. Uses descriptive and engaging language
+                    
+                    Return ONLY the title, nothing else."""
+                },
+                {
+                    "role": "user",
+                    "content": f"Image generation prompt: {clean_message}"
+                }
+            ]
+            
+            title = ""
+            for chunk in ollama_client.chat(
+                model=get_model_version(default_model),
+                messages=messages,
+                stream=True,
+                options={
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "num_predict": 50
+                }
+            ):
+                if chunk['message']['content']:
+                    title += chunk['message']['content']
+            
+            # Clean up title
+            title = title.strip().strip('"').strip().title()
+            
+            # Fallback and truncate
+            if not title:
+                # Extract key words if AI fails
+                words = clean_message.split()
+                title = ' '.join(words[:3]).title()
+            
+            # Ensure title is not too long
+            return title[:40] if title else "Image Generation"
+        
+        # Use the model to generate a title for other conversations
         messages = [
             {
                 "role": "system",
@@ -640,7 +715,8 @@ def generate_conversation_title(message, response, model):
         return title
         
     except Exception as e:
-        print(f"Error generating title: {e}")
+        print(f"Error generating conversation title: {e}")
+        traceback.print_exc()
         return "Untitled Conversation"
 
 def update_conversation_title(conv_id, title):
@@ -691,6 +767,11 @@ def delete_conversation(conv_id):
         # Retrieve updated conversation list
         conversations = get_conversation_list()
         
+        # Combine all available models
+        available_models = [get_model_display_name(m) for m in get_available_models()]  # Ollama models
+        bot_names = get_bot_names()  # Saved bot names
+        all_models = available_models + bot_names + ["SDXL"]  # Combine all models
+        
         # Return all expected outputs
         return (
             pd.DataFrame(
@@ -701,7 +782,7 @@ def delete_conversation(conv_id):
             "",  # Empty text
             None,  # State (None)
             gr.Dropdown(
-                choices=get_available_models(), 
+                choices=all_models, 
                 value=get_default_model()
             )  # Model dropdown reset
         )
@@ -716,7 +797,7 @@ def delete_conversation(conv_id):
             f"Error deleting conversation: {str(e)}",
             None,
             gr.Dropdown(
-                choices=get_available_models(), 
+                choices=all_models, 
                 value=get_default_model()
             )
         )
@@ -855,7 +936,7 @@ def handle_conversation_click(evt: gr.SelectData, conv_list):
         
         if not conv_result:
             print(f"No conversation found with title: {selected_title}")
-            return None, [], "llama3.1:8b", "New Conversation"
+            return None, [], get_model_display_name("llama3.1:8b"), "New Conversation"
         
         # Get the conversation ID
         conv_id = conv_result[0]
@@ -863,22 +944,30 @@ def handle_conversation_click(evt: gr.SelectData, conv_list):
         # Load conversation details
         title, model, chat_history = load_conversation(conv_id)
         
-        # Ensure model is valid or use default
-        available_models = get_available_models()
-        if not model or (model not in available_models and not get_bot_by_name(model)):
-            model = "llama3.1:8b"
+        # Format the model name for display
+        if model == "SDXL":
+            # Keep SDXL model as is
+            display_model = "SDXL"
+        elif get_bot_by_name(model):
+            # Keep bot names as is
+            display_model = model
+        else:
+            # Format Ollama model names
+            display_model = get_model_display_name(model or "llama3.1:8b")
+        
+        print(f"Loaded conversation with model: {model}, display model: {display_model}")
         
         return (
             conv_id,  # Current conversation ID
             chat_history,  # Loaded chat history
-            model,  # Last used model or bot for this conversation
+            display_model,  # Properly formatted model name
             title  # Conversation title
         )
     
     except Exception as e:
         print(f"Error handling conversation click: {e}")
         traceback.print_exc()
-        return None, [], "llama3.1:8b", "New Conversation"
+        return None, [], get_model_display_name("llama3.1:8b"), "New Conversation"
 
 def load_conversation(conv_id):
     """
@@ -901,6 +990,7 @@ def load_conversation(conv_id):
         chat_history = []
         current_user_msg = None
         current_assistant_msg = None
+        has_generated_image = False
         
         for msg in messages:
             if msg['role'] == 'user':
@@ -913,7 +1003,8 @@ def load_conversation(conv_id):
             elif msg['role'] == 'assistant':
                 content = msg['content']
                 # Check if this is an image message
-                if content.startswith('![Generated Image]('):
+                if '[Generated Image]' in content or content.startswith('![Generated Image]('):
+                    has_generated_image = True
                     # Extract the image path and ensure it uses the correct format
                     import re
                     match = re.search(r'!\[Generated Image\]\((file/)?(.+)\)', content)
@@ -927,6 +1018,12 @@ def load_conversation(conv_id):
         # Add the last message pair if it exists
         if current_user_msg and current_assistant_msg:
             chat_history.append((current_user_msg, current_assistant_msg))
+        
+        # If we detected generated images, force the model to SDXL
+        if has_generated_image:
+            model = "SDXL"
+            # Update the model in the database to maintain consistency
+            update_conversation_model(model, conv_id)
         
         return title, model, chat_history
     
@@ -979,13 +1076,15 @@ def get_conversation_details(conv_id):
                      WHERE conversation_id = ? 
                      ORDER BY timestamp''', (conv_id,))
         
-        # Collect messages
+        # Collect messages and check for generated images
         messages = []
+        has_generated_image = False
         for row in c.fetchall():
             role, content, timestamp = row
             
-            # Check if content is an image markdown
-            if content.startswith('![Generated Image]('):
+            # Check if content contains image markdown
+            if content.startswith('![Generated Image](') or '[Generated Image]' in content:
+                has_generated_image = True
                 # Extract the image path
                 import re
                 match = re.search(r'!\[Generated Image\]\((file/)?(.+)\)', content)
@@ -1001,11 +1100,19 @@ def get_conversation_details(conv_id):
                 'timestamp': timestamp
             })
         
+        # If we detected generated images, force the model to SDXL
+        if has_generated_image:
+            last_used_model = "SDXL"
+            # Update the model in the database
+            c.execute('UPDATE conversations SET last_used_model = ? WHERE id = ?', ("SDXL", conv_id))
+            conn.commit()
+        
         conn.close()
         return title, last_used_model, messages
     
     except Exception as e:
-        print(f"Error retrieving conversation details: {e}")
+        print(f"Error getting conversation details: {e}")
+        traceback.print_exc()
         return None, None, []
 
 def rename_current_chat(conv_id, new_title):
@@ -1068,13 +1175,37 @@ def get_chat_title(conv_id):
     return result[0] if result else "New Chat"
 
 def update_conversation_model(model, conv_id):
+    """
+    Update the model used for a conversation
+    
+    Args:
+        model (str): Model to use for the conversation
+        conv_id (str): Conversation ID
+        
+    Returns:
+        str: Updated model name
+    """
     if conv_id:
         try:
+            # Check if this is an image generation conversation
             conn = sqlite3.connect('conversations.db')
             c = conn.cursor()
+            
+            # Check messages for image generation
+            c.execute('''SELECT content FROM messages 
+                        WHERE conversation_id = ? 
+                        AND (content LIKE '%![Generated Image]%' 
+                             OR content LIKE '%[Generated Image]%')''', (conv_id,))
+            has_images = bool(c.fetchone())
+            
+            # If this is an image generation conversation, force SDXL
+            if has_images:
+                model = "SDXL"
+            
+            # Update the model in the database
             c.execute('''UPDATE conversations 
-                         SET last_used_model = ? 
-                         WHERE id = ?''', (model, conv_id))
+                        SET last_used_model = ? 
+                        WHERE id = ?''', (model, conv_id))
             conn.commit()
             conn.close()
             print(f"Updated conversation {conv_id} model to {model}")
@@ -1100,10 +1231,22 @@ def get_default_model():
         
         conn.close()
         
-        return result[0] if result else "llama3.1:8b"
+        if result:
+            model_name = result[0]
+            # If it's an Ollama model, get the display name
+            if model_name == "SDXL":
+                return "SDXL"
+            elif get_bot_by_name(model_name):
+                return model_name
+            else:
+                return get_model_display_name(model_name)
+        
+        # Return formatted default model name
+        return get_model_display_name("llama3.1:8b")
     except Exception as e:
         print(f"Error retrieving default model: {e}")
-        return "llama3.1:8b"
+        traceback.print_exc()
+        return get_model_display_name("llama3.1:8b")
 
 def set_default_model(model):
     """
@@ -2083,7 +2226,7 @@ def generate_image_from_prompt(prompt, width, height):
             print("ComfyUI is not initialized, checking initialization status...")
             # Wait briefly to see if initialization completes
             import time
-            for _ in range(3):  # Try for up to 6 seconds
+            for _ in range(10):  # Try for up to 20 seconds
                 time.sleep(2)
                 if comfyui is not None:
                     break
@@ -2096,10 +2239,10 @@ def generate_image_from_prompt(prompt, width, height):
         width = int(width)
         height = int(height)
         
-        # Generate the image
-        image = comfyui.generate_image(prompt, width, height)
+        # Generate the image with a longer timeout
+        image = comfyui.generate_image(prompt, width=width, height=height, timeout=600)  # 10-minute timeout
         if image is None:
-            raise gr.Error("Failed to generate image. Please check the logs for details.")
+            raise gr.Error("Failed to generate image. The process may have timed out or encountered an error.")
         
         print("Image generated successfully")
         return image
@@ -2124,10 +2267,25 @@ def generate_image():
         return jsonify({'error': 'Prompt is required'}), 400
     
     try:
-        image = comfyui.generate_image(prompt, width, height)
+        # Generate the image
+        image = comfyui.generate_image(prompt, width=width, height=height, timeout=600)  # 10-minute timeout
         image_path = f'static/generated/{str(uuid.uuid4())}.png'
         image.save(image_path)
-        return jsonify({'image_url': image_path})
+        
+        # Create or update conversation with image generation title
+        title = generate_conversation_title(prompt, "", "SDXL")
+        
+        # Create a new conversation for the image generation
+        conv_id = create_conversation(prompt, "SDXL")
+        
+        # Update the conversation title
+        update_conversation_title(conv_id, title)
+        
+        return jsonify({
+            'image_url': image_path, 
+            'conversation_id': conv_id, 
+            'conversation_title': title
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2373,6 +2531,19 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 manage_bots_btn = gr.Button(" Manage Bots", variant="secondary")
             
         with gr.Column(scale=3):
+            # Get available models and format them
+            available_models = [get_model_display_name(m) for m in get_available_models()]  # Ollama models
+            bot_names = get_bot_names()  # Bot names
+            all_models = available_models + bot_names + ["SDXL"]  # Combine all models
+            
+            model_dropdown = gr.Dropdown(
+                choices=all_models,
+                value=get_default_model(),  # Use the default model from settings
+                label="Model",
+                interactive=True,
+                elem_id="model_selector"
+            )
+            
             # Chat title at the top
             with gr.Row():
                 chat_title = gr.Textbox(
@@ -2407,34 +2578,44 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             )
 
             # Confirm rename logic
-            def confirm_rename(new_title, current_chat_title):
+            def confirm_rename(current_chat_title, new_title):
                 if not new_title:
-                    return current_chat_title, gr.update(visible=False), gr.update(visible=False)
+                    return current_chat_title, gr.update(visible=False), gr.update(visible=False), conv_list
                 
-                # Assuming you have a function to rename the conversation
-                renamed_title = rename_current_chat(current_chat_title, new_title)
+                # Get conversation ID from title
+                conn = sqlite3.connect('conversations.db')
+                c = conn.cursor()
                 
-                return renamed_title, gr.update(visible=False), gr.update(visible=False)
-
+                # Directly query for the conversation ID by title
+                c.execute('''SELECT id FROM conversations 
+                             WHERE title = ? 
+                             ORDER BY created_at DESC 
+                             LIMIT 1''', (current_chat_title,))
+                
+                conv_result = c.fetchone()
+                conn.close()
+                
+                if not conv_result:
+                    print(f"No conversation found with title: {current_chat_title}")
+                    return current_chat_title, gr.update(visible=False), gr.update(visible=False), conv_list
+                
+                # Get the conversation ID
+                conv_id = conv_result[0]
+                
+                # Update the conversation title
+                rename_current_chat(conv_id, new_title)
+                # Get updated conversation list
+                updated_conversations = format_conversation_list()
+                return new_title, gr.update(visible=False), gr.update(visible=False), updated_conversations
+                
             confirm_rename_btn.click(
                 fn=confirm_rename,
-                inputs=[rename_chat_input, chat_title],
-                outputs=[chat_title, rename_chat_input, confirm_rename_btn]
+                inputs=[chat_title, rename_chat_input],
+                outputs=[chat_title, rename_chat_input, confirm_rename_btn, conv_list]
             )
 
             # Conversation options right under the title
             with gr.Row():
-                with gr.Column(scale=3):
-                    model_dropdown = gr.Dropdown(
-                        choices=(
-                            [get_model_display_name(m) for m in get_available_models()] +  # Ollama models
-                            get_bot_names() + ["SDXL"]  # Saved bot names and SDXL
-                        ), 
-                        value="llama3.1:8b", 
-                        label="Model",
-                        interactive=True,
-                        elem_id="model_selector"
-                    )
                 with gr.Column(scale=1):
                     delete_conv_btn = gr.Button(" Delete Current Conversation", variant="stop")
             
@@ -2466,14 +2647,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                     type="filepath"
                 )
                 upload_status = gr.Markdown()
-
-            # Image generation components
-            with gr.Accordion('Image Generation', open=False):
-                image_prompt = gr.Textbox(label='Image Prompt')
-                image_width = gr.Slider(256, 2048, value=1024, step=256, label='Width')
-                image_height = gr.Slider(256, 2048, value=1024, step=256, label='Height')
-                generate_image_btn = gr.Button('Generate Image')
-                generated_image = gr.Image(label='Generated Image')
 
             # Hidden components for state management
             current_conversation = gr.State(None)
@@ -2742,6 +2915,10 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 if sdxl_params.get('style'):
                     clean_prompt = f"{clean_prompt} {sdxl_params['style']}"
                 
+                # Add user message to history first
+                history.append((message, "Generating image..."))
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
                 image = comfyui.generate_image(
                     prompt=clean_prompt,
                     width=sdxl_params.get('width', 1024),
@@ -2756,92 +2933,96 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 # Ensure conversations directory exists
                 os.makedirs('conversations', exist_ok=True)
                 
-                # Prepare image for chat history
-                # Save the image to a unique filename in conversation directory
+                # Save the image and create markdown
                 os.makedirs(f'conversations/{conv_id}', exist_ok=True)
                 image_filename = f'conversations/{conv_id}/image_{uuid.uuid4()}.png'
                 image.save(image_filename)
-                
-                # Prepare markdown for image display using 'file/' prefix
                 image_markdown = f"![Generated Image](file/{image_filename})"
                 
-                # Update chat history with image and prompt
-                history.append((message, image_markdown))
+                # Update history with the actual image
+                history[-1] = (message, image_markdown)
                 
                 # Save messages to database
                 save_message(conv_id, model_name, "user", message)
                 save_message(conv_id, model_name, "assistant", image_markdown)
                 
-                # Log the image generation
-                print(f"Image generated and saved: {image_filename}")
+                # Generate title if it's a new conversation
+                if get_chat_title(conv_id) == "Untitled Conversation":
+                    title = generate_conversation_title(message, image_markdown, model_name)
+                    update_conversation_title(conv_id, title)
                 
-                # Return all expected Gradio interface outputs
-                return (
-                    history,  # Chatbot history
-                    "",  # Clear input textbox
-                    get_chat_title(conv_id),  # Chat title
-                    format_conversation_list()  # Updated conversation list
-                )
-            
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
             except Exception as e:
-                # Handle image generation errors
                 error_msg = f"Image generation failed: {str(e)}"
-                print(error_msg)  # Print to console for debugging
+                print(error_msg)
                 
-                # Update history with error message
-                history.append((message, error_msg))
+                # Update history with error
+                if len(history) > 0 and history[-1][1] == "Generating image...":
+                    history[-1] = (message, error_msg)
+                else:
+                    history.append((message, error_msg))
                 
-                # Save error messages to database
+                # Save error messages
                 save_message(conv_id, model_name, "user", message)
                 save_message(conv_id, model_name, "assistant", error_msg)
                 
-                # Return all expected Gradio interface outputs
-                return (
-                    history,  # Chatbot history
-                    "",  # Clear input textbox
-                    get_chat_title(conv_id),  # Chat title
-                    format_conversation_list()  # Updated conversation list
-                )
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
         
         # Default behavior for non-SDXL models
-        try:
-            # Generate response using the model with context
-            response_generator = generate_response(message, model_name, history, conv_id, context=context)
-            
-            # Collect the full response
-            full_response = ""
-            updated_history = history + [(message, "")]
-            
-            for response in response_generator:
-                if response and isinstance(response, tuple):
-                    _, updated_history, current_conv_id = response
-                    # Accumulate the response
-                    if len(updated_history) > len(history):
-                        full_response = updated_history[-1][1]
-            
-            # Return all expected Gradio interface outputs
-            return (
-                updated_history,  # Chatbot history
-                "",  # Clear input textbox
-                get_chat_title(current_conv_id),  # Chat title
-                format_conversation_list()  # Updated conversation list
-            )
-        
-        except Exception as e:
-            # Handle response generation errors
-            error_msg = f"Response generation failed: {str(e)}"
-            print(error_msg)
-            
-            # Update history with error message
-            updated_history = history + [(message, error_msg)]
-            
-            # Return all expected Gradio interface outputs
-            return (
-                updated_history,  # Chatbot history
-                "",  # Clear input textbox
-                get_chat_title(conv_id),  # Chat title
-                format_conversation_list()  # Updated conversation list
-            )
+        else:
+            try:
+                # Generate response using the model with context
+                response_generator = generate_response(message, model_name, history, conv_id, context=context)
+                
+                # Add user message to history
+                history.append((message, ""))
+                save_message(conv_id, model_name, "user", message)
+                
+                # Generate title if it's a new conversation
+                if get_chat_title(conv_id) == "Untitled Conversation":
+                    title = generate_conversation_title(message, "", model_name)
+                    update_conversation_title(conv_id, title)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
+                # Stream the response
+                full_response = ""
+                for response in response_generator:
+                    if response and isinstance(response, tuple):
+                        _, updated_history, current_conv_id = response
+                        # Update the response in history
+                        if len(updated_history) > 0:
+                            full_response = updated_history[-1][1]
+                            history[-1] = (message, full_response)
+                            yield history, "", get_chat_title(current_conv_id), format_conversation_list()
+                
+                # Save the final response
+                save_message(conv_id, model_name, "assistant", full_response)
+                
+                # Update title if still untitled
+                if get_chat_title(conv_id) == "Untitled Conversation":
+                    title = generate_conversation_title(message, full_response, model_name)
+                    update_conversation_title(conv_id, title)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
+            except Exception as e:
+                error_msg = f"Error generating response: {str(e)}"
+                print(error_msg)
+                print(traceback.format_exc())
+                
+                # Update history with error
+                if len(history) > 0 and history[-1][0] == message:
+                    history[-1] = (message, error_msg)
+                else:
+                    history.append((message, error_msg))
+                
+                # Save error messages
+                save_message(conv_id, model_name, "user", message)
+                save_message(conv_id, model_name, "assistant", error_msg)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
     
     submit_btn.click(
         submit_message,
@@ -2856,7 +3037,8 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             msg_box,           # Clear message input
             chat_title,        # Update chat title
             conv_list          # Update conversation list
-        ]
+        ],
+        queue=True
     )
     
     msg_box.submit(
@@ -2865,7 +3047,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         outputs=[chatbot, msg_box, chat_title, conv_list],
         queue=True
     )
-    
+
     delete_conv_btn.click(
         delete_conversation, 
         inputs=[current_conversation],
@@ -2976,11 +3158,11 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         except Exception as e:
             raise gr.Error(f'Image generation failed: {str(e)}')
 
-    generate_image_btn.click(
-        fn=generate_image_from_prompt,
-        inputs=[image_prompt, image_width, image_height],
-        outputs=generated_image
-    )
+    # generate_image_btn.click(
+    #     fn=generate_image_from_prompt,
+    #     inputs=[image_prompt, image_width, image_height],
+    #     outputs=generated_image
+    # )
 
 def parse_sdxl_commands(message):
     """Parse SDXL commands from the message and return parameters and cleaned message."""

@@ -77,7 +77,7 @@ class ComfyUIIntegrator:
         
         return prompt
 
-    def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, negative_prompt: str = "", steps: int = 30, cfg: float = 7.0, quality: float = 1.0, seed=None) -> Image.Image:
+    def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, negative_prompt: str = "", steps: int = 30, cfg: float = 7.0, quality: float = 1.0, seed=None, timeout=600) -> Image.Image:
         """
         Generate an image using ComfyUI's SDXL workflow
         
@@ -90,6 +90,7 @@ class ComfyUIIntegrator:
             cfg (float): Classifier free guidance scale
             quality (float): Quality/denoise strength
             seed (int, optional): Seed for generation. If None, a random seed will be used.
+            timeout (int, optional): Maximum time to wait for image generation in seconds. Default is 600 (10 minutes).
             
         Returns:
             PIL.Image: Generated image
@@ -108,7 +109,8 @@ class ComfyUIIntegrator:
                 steps=steps, 
                 cfg=cfg, 
                 quality=quality,
-                seed=seed
+                seed=seed,
+                timeout=timeout
             )
         except Exception as e:
             self.logger.error(f"Image generation failed: {str(e)}")
@@ -328,6 +330,8 @@ class ComfyUIAPI:
             PIL.Image or None: Generated image or None if generation fails
         """
         start_time = time.time()
+        poll_interval = 1.0  # Start with 1 second polling
+        max_poll_interval = 2.0  # Maximum polling interval
         
         self.logger.info(f"Starting image generation for prompt ID: {prompt_id}")
         print("\nGenerating image...")
@@ -335,17 +339,12 @@ class ComfyUIAPI:
         while time.time() - start_time < timeout:
             try:
                 # Fetch history
-                try:
-                    history_response = self.session.get(
-                        f"{self.server_url}/history/{prompt_id}", 
-                        timeout=5
-                    )
-                    history_response.raise_for_status()
-                    history = history_response.json()
-                except (requests.RequestException, ValueError) as hist_err:
-                    self.logger.warning(f"Failed to fetch history: {hist_err}")
-                    time.sleep(1)
-                    continue
+                history_response = self.session.get(
+                    f"{self.server_url}/history/{prompt_id}", 
+                    timeout=5
+                )
+                history_response.raise_for_status()
+                history = history_response.json()
                 
                 # Check if image is ready
                 if prompt_id in history:
@@ -356,10 +355,29 @@ class ComfyUIAPI:
                             
                             generation_time = time.time() - start_time
                             print(f"Image generated in {generation_time:.1f} seconds")
-                            return self.download_image(image_data)
+                            
+                            # Try API download first
+                            try:
+                                filename = image_data["filename"]
+                                subfolder = image_data.get("subfolder", "")
+                                image_url = f"{self.server_url}/view?filename={filename}&subfolder={subfolder}&type=output"
+                                response = self.session.get(image_url, timeout=5)
+                                response.raise_for_status()
+                                return Image.open(BytesIO(response.content))
+                            except Exception as download_err:
+                                self.logger.warning(f"API download failed: {str(download_err)}, using filesystem")
+                                # Small delay before filesystem check
+                                time.sleep(0.5)
+                                return self.get_latest_image()
                 
-                time.sleep(0.5)
+                # Adaptive polling interval
+                time.sleep(min(poll_interval, max_poll_interval))
+                poll_interval *= 1.5  # Increase polling interval
                 
+            except requests.RequestException as e:
+                self.logger.warning(f"Request failed: {e}")
+                time.sleep(1)
+                continue
             except Exception as e:
                 self.logger.error(f"Unexpected error during image generation: {e}", exc_info=True)
                 print(f"\nError during generation: {e}")
@@ -368,6 +386,54 @@ class ComfyUIAPI:
         print("\nImage generation timed out")
         self.logger.error("Timeout waiting for image generation")
         return self.get_latest_image()
+
+    def generate_image(self, prompt, negative_prompt="", width=1024, height=1024, steps=30, cfg=7.0, quality=1.0, seed=None, timeout=600):
+        """
+        Generate an image using the SDXL workflow
+        
+        Args:
+            prompt (str): The prompt for image generation
+            negative_prompt (str): What not to include in the image
+            width (int): Image width
+            height (int): Image height
+            steps (int): Number of sampling steps
+            cfg (float): Classifier free guidance scale
+            quality (float): Quality/denoise strength
+            seed (int, optional): Seed for generation. If None, a random seed will be used.
+            timeout (int, optional): Maximum time to wait for image generation in seconds. Default is 600 (10 minutes).
+            
+        Returns:
+            PIL.Image: Generated image
+        """
+        try:
+            # Compress the prompt
+            compressed_prompt = self.compress_prompt(prompt)
+            compressed_negative_prompt = self.compress_prompt(negative_prompt) if negative_prompt else ""
+            
+            # Get the workflow with parameters
+            workflow = self.get_sdxl_workflow(
+                prompt=compressed_prompt,
+                negative_prompt=compressed_negative_prompt,
+                width=width,
+                height=height,
+                steps=steps,
+                cfg=cfg,
+                quality=quality,
+                seed=seed
+            )
+            
+            # Queue the prompt
+            prompt_id = self.queue_prompt(workflow)
+            if not prompt_id:
+                self.logger.error("Failed to queue workflow")
+                return None
+            
+            # Get the image output
+            return self.get_image(prompt_id, timeout=timeout)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate image: {str(e)}")
+            return None
 
     def download_image(self, image_data):
         try:
@@ -394,48 +460,4 @@ class ComfyUIAPI:
             return Image.open(latest_file)
         except Exception as e:
             self.logger.error(f"Failed to retrieve image: {str(e)}")
-            return None
-
-    def generate_image(self, prompt, negative_prompt="", width=1024, height=1024, steps=30, cfg=7.0, quality=1.0, seed=None):
-        """
-        Generate an image using the SDXL workflow
-        
-        Args:
-            prompt (str): The prompt for image generation
-            negative_prompt (str): What not to include in the image
-            width (int): Image width
-            height (int): Image height
-            steps (int): Number of sampling steps
-            cfg (float): Classifier free guidance scale
-            quality (float): Quality/denoise strength
-            seed (int, optional): Seed for generation. If None, a random seed will be used.
-            
-        Returns:
-            PIL.Image: Generated image
-        """
-        try:
-            # Compress the prompt
-            compressed_prompt = self.compress_prompt(prompt)
-            compressed_negative_prompt = self.compress_prompt(negative_prompt) if negative_prompt else ""
-            
-            # Get the workflow with parameters
-            workflow = self.get_sdxl_workflow(
-                prompt=compressed_prompt,
-                negative_prompt=compressed_negative_prompt,
-                width=width,
-                height=height,
-                steps=steps,
-                cfg=cfg,
-                quality=quality,
-                seed=seed
-            )
-            
-            # Queue the prompt
-            p = self.queue_prompt(workflow)
-            
-            # Get the image output
-            return self.get_image(p)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate image: {str(e)}")
             return None
