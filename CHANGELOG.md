@@ -27,6 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplified timeout and error recovery in image generation
 - Enhanced logging and error tracking
 
+## [0.2.0] - 2025-02-21
+### Fixed
+- Resolved model dropdown population issue in new chat initialization
+- Fixed image markdown rendering for generated images
+- Corrected model name handling in dropdown and backend
+
+### UI/UX Changes
+- Updated file upload button with label
+- Improved image generation and file serving mechanisms
+- Refined default model selection process
+
+### Minor Improvements
+- Simplified model version handling
+- Enhanced error tracking and logging
+- Improved cross-component compatibility
+
 ## [0.1.0] - 2025-02-17
 ### Added
 - Initial project setup

@@ -10,6 +10,9 @@ from datetime import datetime
 import tempfile
 import requests
 import threading
+import atexit
+import base64
+import io
 
 import gradio as gr
 import ollama
@@ -29,82 +32,97 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Answer questions accu
 ollama_client = ollama.Client(host='http://localhost:11434')
 
 # Database setup
-def init_db():
-    """
-    Initialize the database with required tables
-    """
+def migrate_database():
+    """Perform database migrations"""
+    conn = sqlite3.connect('conversations.db')
+    c = conn.cursor()
+    
     try:
-        # Connect to the database
-        conn = sqlite3.connect('conversations.db')
-        cursor = conn.cursor()
+        # Check if deleted column exists
+        c.execute("PRAGMA table_info(documents)")
+        columns = [col[1] for col in c.fetchall()]
         
-        # Create conversations table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT DEFAULT 'New Conversation',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_used_model TEXT,
-                is_active INTEGER DEFAULT 1
-            )
-        ''')
-        
-        # Create messages table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER,
-                model TEXT,
-                role TEXT,
-                content TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            )
-        ''')
-        
-        # Create documents table for RAG
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT,
-                original_name TEXT,
-                file_type TEXT,
-                embedding_path TEXT,
-                conversation_id INTEGER,
-                uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-            )
-        ''')
-        
-        # Create settings table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        ''')
-        
-        # Check if default model exists
-        cursor.execute('SELECT value FROM settings WHERE key = "default_model"')
-        result = cursor.fetchone()
-        
-        if not result:
-            # Set default model if not exists
-            cursor.execute('''
-                INSERT INTO settings (key, value) 
-                VALUES ('default_model', 'llama3.1:8b')
-            ''')
-            print("Initialized default model setting to llama3.1:8b")
-        else:
-            print(f"Using existing default model: {result[0]}")
-        
-        # Commit changes and close connection
-        conn.commit()
+        if 'deleted' not in columns:
+            print("Adding 'deleted' column to documents table")
+            c.execute('ALTER TABLE documents ADD COLUMN deleted INTEGER DEFAULT 0')
+            conn.commit()
+            
     except Exception as e:
-        print(f"Error initializing database: {e}")
+        print(f"Error during migration: {e}")
         traceback.print_exc()
     finally:
         conn.close()
+
+def init_db():
+    """Initialize the database with required tables"""
+    conn = sqlite3.connect('conversations.db')
+    c = conn.cursor()
+    
+    # Create conversations table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_model TEXT
+        )
+    ''')
+    
+    # Create messages table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+        )
+    ''')
+    
+    # Create documents table with deleted flag
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            embedding_path TEXT,
+            conversation_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted INTEGER DEFAULT 0,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+        )
+    ''')
+    
+    # Create settings table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    
+    # Check if default model exists
+    c.execute('SELECT value FROM settings WHERE key = "default_model"')
+    result = c.fetchone()
+    
+    if not result:
+        # Set default model if not exists
+        c.execute('''
+            INSERT INTO settings (key, value) 
+            VALUES ('default_model', 'llama3.1:8b')
+        ''')
+        print("Initialized default model setting to llama3.1:8b")
+    else:
+        print(f"Using existing default model: {result[0]}")
+    
+    # Commit changes and close connection
+    conn.commit()
+    conn.close()
+    
+    # Run migrations after creating tables
+    migrate_database()
 
 def init_bots_db():
     """Initialize the database with required tables"""
@@ -244,7 +262,7 @@ def get_available_models():
     Get list of available models from Ollama
     
     Returns:
-        list: List of model names with their versions
+        list: List of model names without version suffixes
     """
     try:
         # Get models using ollama list command
@@ -253,19 +271,22 @@ def get_available_models():
         if response.status_code == 200:
             data = response.json()
             if 'models' in data:
-                # Keep the full model name with version
-                models = [model['name'] for model in data['models']]
+                # Extract base model names without version
+                models = [model['name'].split(':')[0] for model in data['models']]
         
         # If no models found, use default list based on what's installed
         if not models:
-            models = ["phi3.5:latest", "mistral:latest", "llama3.1:8b", "codellama:latest"]
+            models = ["phi3.5", "mistral", "llama3.1", "codellama"]
+        
+        # Remove duplicates and sort
+        models = sorted(set(models))
         
         return models
         
     except Exception as e:
         print(f"Error getting models: {e}")
         # Return default models if API fails
-        return ["phi3.5:latest", "mistral:latest", "llama3.1:8b", "codellama:latest"]
+        return ["phi3.5", "mistral", "llama3.1", "codellama"]
 
 def get_model_display_name(model_name):
     """
@@ -396,7 +417,7 @@ def generate_response(message, model, chat_history, conv_id, context=None):
     
     Args:
         message (str): User's input message
-        model (str): Model or bot name to use
+        model (str): Model to use for the conversation
         chat_history (list): Conversation history
         conv_id (str): Conversation ID
         context (str, optional): RAG context
@@ -446,7 +467,17 @@ def generate_response(message, model, chat_history, conv_id, context=None):
         if combined_context:
             messages.append({
                 "role": "system",
-                "content": f"Here is some relevant context to help answer the user's question, make sure to adhere to the system prompt while using the context:\n\n{combined_context}"
+                "content": f"""Use the following context to help answer the user's question. The context contains relevant information from documents:
+
+{combined_context}
+
+Remember to:
+1. Use the context to provide accurate and relevant information
+2. If the context doesn't fully answer the question, combine it with your general knowledge
+3. Always cite specific information from the context when using it
+4. If the context is not relevant to the question, rely on your general knowledge instead
+
+Please answer the user's question:"""
             })
         
         # Add chat history
@@ -506,7 +537,7 @@ def generate_response(message, model, chat_history, conv_id, context=None):
         
         # Generate title for first message
         if is_first_message:
-            title = generate_conversation_title(message, response, base_model)
+            title = generate_conversation_title(message, response, model)
             update_conversation_title(conv_id, title)
         
         # Update conversation model if using a bot
@@ -618,7 +649,7 @@ def generate_conversation_title(message, response, model):
     Args:
         message (str): User's message
         response (str): Assistant's response
-        model (str): Model used for generation
+        model (str): Model or bot name used for generation
     
     Returns:
         str: Generated title
@@ -680,6 +711,12 @@ def generate_conversation_title(message, response, model):
             
             # Ensure title is not too long
             return title[:40] if title else "Image Generation"
+        
+        # Check if the model is actually a bot name
+        bot_config = get_bot_by_name(model)
+        if bot_config:
+            # Use the bot's base model instead
+            model = bot_config['base_model']
         
         # Use the model to generate a title for other conversations
         messages = [
@@ -1012,7 +1049,7 @@ def load_conversation(conv_id):
                         image_path = match.group(2)
                         # Remove any 'file/' prefix if it exists and add it back
                         image_path = image_path.replace('file/', '')
-                        content = f"![Generated Image](file/{image_path})"
+                        content = f"![Generated Image](/gradio_api/file={image_path})"
                 current_assistant_msg = content
         
         # Add the last message pair if it exists
@@ -1679,29 +1716,38 @@ def process_document(file_path, original_name, conversation_id=None):
         tuple: (success, message)
     """
     try:
-        # Generate unique filename
-        file_ext = os.path.splitext(original_name)[1].lower()
-        unique_filename = f"{uuid.uuid4()}{file_ext}"
+        print(f"\nProcessing document: {original_name}")
+        print(f"Conversation ID: {conversation_id}")
+        print(f"File path: {file_path}")
         
-        # Create documents directory if it doesn't exist
-        docs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "documents")
+        # Create a unique filename to avoid collisions
+        unique_filename = f"{str(uuid.uuid4())}_{original_name}"
+        file_ext = os.path.splitext(original_name)[1].lower()
+        
+        # Create docs directory if it doesn't exist
+        docs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs")
         os.makedirs(docs_dir, exist_ok=True)
         
-        # Copy file to documents directory
+        # Copy file to permanent location
         permanent_path = os.path.join(docs_dir, unique_filename)
         shutil.copy2(file_path, permanent_path)
+        print(f"File copied to: {permanent_path}")
         
-        # Load document based on file type
+        # Select appropriate loader based on file type
         if file_ext == '.pdf':
             loader = PyPDFLoader(permanent_path)
+            print("Using PDF loader")
         elif file_ext == '.txt':
             loader = TextLoader(permanent_path)
+            print("Using text loader")
         elif file_ext in ['.doc', '.docx']:
             loader = Docx2txtLoader(permanent_path)
+            print("Using Word document loader")
         else:
             raise ValueError(f"Unsupported file type: {file_ext}")
         
         # Load and split the document
+        print("Loading document...")
         documents = loader.load()
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
@@ -1710,33 +1756,67 @@ def process_document(file_path, original_name, conversation_id=None):
             add_start_index=True,
         )
         chunks = text_splitter.split_documents(documents)
+        print(f"Document split into {len(chunks)} chunks")
         
         # Create embeddings directory
         embeddings_dir = os.path.join(docs_dir, "embeddings", str(uuid.uuid4()))
         os.makedirs(embeddings_dir, exist_ok=True)
+        print(f"Created embeddings directory: {embeddings_dir}")
         
         # Initialize embeddings model
+        print("Initializing embeddings model...")
         embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
             model_kwargs={'device': 'cpu'}
         )
         
+        # Generate unique IDs for each chunk
+        ids = [str(uuid.uuid4()) for _ in range(len(chunks))]
+        
         # Create and persist vector store
+        print("Creating vector store...")
         vectordb = Chroma.from_documents(
             documents=chunks,
             embedding=embeddings,
-            persist_directory=embeddings_dir
+            persist_directory=embeddings_dir,
+            ids=ids
         )
         vectordb.persist()
+        print("Vector store created and persisted")
         
         # Save document info to database
+        print("Saving document info to database...")
         conn = sqlite3.connect('conversations.db')
         c = conn.cursor()
+        
+        # Add metadata to chunks
+        for chunk in chunks:
+            if 'source' not in chunk.metadata:
+                chunk.metadata['source'] = original_name
+        
+        # Convert conversation_id to integer if it's a string
+        if conversation_id and isinstance(conversation_id, str):
+            try:
+                conversation_id = int(conversation_id)
+                print(f"Converted conversation_id string to integer: {conversation_id}")
+            except ValueError:
+                print(f"Warning: Invalid conversation_id format: {conversation_id}")
+                conversation_id = None
+        
         c.execute('''INSERT INTO documents 
                      (filename, original_name, file_type, embedding_path, conversation_id)
                      VALUES (?, ?, ?, ?, ?)''',
-                 (unique_filename, original_name, file_ext, embeddings_dir, conversation_id))
+                  (unique_filename, original_name, file_ext, embeddings_dir, conversation_id))
+        
         conn.commit()
+        print(f"Document saved to database with conversation_id: {conversation_id}")
+        
+        # Verify the document was saved
+        c.execute('SELECT id FROM documents WHERE filename = ? AND conversation_id = ?', 
+                 (unique_filename, conversation_id))
+        doc_id = c.fetchone()
+        print(f"Verified document saved with ID: {doc_id[0] if doc_id else None}")
+        
         conn.close()
         
         return True, f"Successfully processed {original_name}"
@@ -1747,40 +1827,67 @@ def process_document(file_path, original_name, conversation_id=None):
         return False, f"Error processing document: {str(e)}"
 
 def handle_file_upload(file_obj, conversation_id=None):
-    """
-    Handle file upload from Gradio interface
+    """Handle file upload from Gradio interface
     
     Args:
         file_obj: Gradio file object
         conversation_id (int, optional): Current conversation ID
     
     Returns:
-        str: Status message
+        tuple: (status_message, document_name, overlay_visibility_state, conversation_id)
     """
     try:
-        if file_obj is None:
-            return "No file uploaded"
-            
-        # Get the original filename from the file path
-        original_name = os.path.basename(file_obj)
-            
-        # Process the uploaded file
-        success, message = process_document(
-            file_obj,  # Gradio now provides the file path directly
-            original_name,
-            conversation_id
-        )
+        print(f"\nHandling file upload for conversation ID: {conversation_id}")
         
-        return message
+        if file_obj is None:
+            print("No file object provided")
+            return "", "", False, conversation_id
+            
+        original_name = os.path.basename(file_obj)
+        print(f"Processing file: {original_name}")
+        
+        # Create new conversation if none exists
+        if not conversation_id:
+            conversation_id = create_conversation("New conversation with document: " + original_name)
+            if not conversation_id:
+                print("Failed to create new conversation")
+                return "Error: Could not create conversation", "", False, None
+            print(f"Created new conversation with ID: {conversation_id}")
+        
+        # Verify conversation exists
+        conn = sqlite3.connect('conversations.db')
+        c = conn.cursor()
+        
+        # Directly query for the conversation ID by title
+        c.execute('''SELECT id FROM conversations 
+                     WHERE title = ? 
+                     ORDER BY created_at DESC 
+                     LIMIT 1''', ("New conversation with document: " + original_name,))
+        
+        conv_result = c.fetchone()
+        conn.close()
+        
+        if not conv_result:
+            print(f"No conversation found with title: New conversation with document: {original_name}")
+            return f"Error: Invalid conversation ID", "", False, None
+        print(f"Verified conversation {conversation_id} exists")
+        
+        success, message = process_document(file_obj, original_name, conversation_id)
+        print(f"Document processing result: {success}, {message}")
+        
+        if success:
+            return message, f"**{original_name}**", True, conversation_id
+        else:
+            return message, "", False, conversation_id
         
     except Exception as e:
         print(f"Error handling file upload: {e}")
         traceback.print_exc()
-        return f"Error uploading file: {str(e)}"
+        return f"Error uploading file: {str(e)}", "", False, conversation_id
 
 def get_relevant_context(query, conversation_id=None, top_k=3):
     """
-    Get relevant context for a query from uploaded documents
+    Get relevant context from uploaded documents
     
     Args:
         query (str): User's query
@@ -1791,19 +1898,24 @@ def get_relevant_context(query, conversation_id=None, top_k=3):
         str: Relevant context from documents
     """
     try:
+        print(f"\nGetting context for query: {query}")
+        print(f"Conversation ID: {conversation_id}")
+        
         # Get all documents for the conversation
         conn = sqlite3.connect('conversations.db')
         c = conn.cursor()
         
         if conversation_id:
-            c.execute('SELECT embedding_path FROM documents WHERE conversation_id = ?', (conversation_id,))
+            c.execute('SELECT embedding_path FROM documents WHERE conversation_id = ? AND deleted = 0', (conversation_id,))
         else:
-            c.execute('SELECT embedding_path FROM documents WHERE conversation_id IS NULL')
+            c.execute('SELECT embedding_path FROM documents WHERE conversation_id IS NULL AND deleted = 0')
             
         embedding_paths = c.fetchall()
+        print(f"Found {len(embedding_paths)} document(s)")
         conn.close()
         
         if not embedding_paths:
+            print("No documents found")
             return ""
         
         # Initialize embeddings model
@@ -1815,22 +1927,36 @@ def get_relevant_context(query, conversation_id=None, top_k=3):
         # Combine results from all documents
         all_results = []
         for path in embedding_paths:
+            print(f"Processing embeddings from: {path[0]}")
             if os.path.exists(path[0]):
                 vectordb = Chroma(
                     persist_directory=path[0],
                     embedding_function=embeddings
                 )
                 results = vectordb.similarity_search(query, k=top_k)
+                print(f"Found {len(results)} relevant chunks")
                 all_results.extend(results)
+            else:
+                print(f"Warning: Embedding path does not exist: {path[0]}")
         
         # Sort by relevance and get top results
         all_results = sorted(all_results, key=lambda x: x.metadata.get('score', 0), reverse=True)[:top_k]
         
         # Format context
         if all_results:
-            context = "\n\n".join([doc.page_content for doc in all_results])
-            return f"Relevant context from documents:\n{context}\n\n"
+            formatted_chunks = []
+            for i, doc in enumerate(all_results, 1):
+                chunk = doc.page_content.strip()
+                source = doc.metadata.get('source', 'Unknown document')
+                print(f"Using chunk {i} from {source}")
+                # Format each chunk with its source
+                formatted_chunks.append(f"[Document {i} - Source: {source}]\n{chunk}")
+            
+            context = "\n\n".join(formatted_chunks)
+            print("Successfully retrieved context")
+            return context
         
+        print("No relevant chunks found")
         return ""
         
     except Exception as e:
@@ -1863,6 +1989,9 @@ def process_bot_document(file_path, original_name, bot_id):
         tuple: (success, message)
     """
     try:
+        print(f"\nProcessing document for bot: {original_name}")
+        print(f"Bot ID: {bot_id}")
+        
         # Generate unique filename
         file_ext = os.path.splitext(original_name)[1].lower()
         unique_filename = f"{str(uuid.uuid4())}{file_ext}"
@@ -1874,25 +2003,31 @@ def process_bot_document(file_path, original_name, bot_id):
         # Copy file to permanent location
         permanent_path = os.path.join(docs_dir, unique_filename)
         shutil.copy2(file_path, permanent_path)
+        print(f"File copied to: {permanent_path}")
         
         # Load and process document based on file type
         if file_ext == '.pdf':
             loader = PyPDFLoader(permanent_path)
+            print("Using PDF loader")
         elif file_ext == '.docx':
             loader = Docx2txtLoader(permanent_path)
+            print("Using Word document loader")
         elif file_ext == '.txt':
             loader = TextLoader(permanent_path)
+            print("Using text loader")
         else:
             os.remove(permanent_path)
             return False, f"Unsupported file type: {file_ext}"
         
         # Load document and split into chunks
+        print("Loading document...")
         documents = loader.load()
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
         )
         chunks = text_splitter.split_documents(documents)
+        print(f"Document split into {len(chunks)} chunks")
         
         # Generate embeddings
         embeddings_dir = os.path.join('bot_embeddings')
@@ -1920,6 +2055,7 @@ def process_bot_document(file_path, original_name, bot_id):
         ''', (bot_id, unique_filename, original_name, file_ext, embedding_path))
         conn.commit()
         conn.close()
+        print("Document information saved to database")
         
         return True, f"Document '{original_name}' added to bot's knowledge base"
         
@@ -2342,7 +2478,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     #conv_list {
         border: none !important;
         overflow-x: hidden !important;
-        margin-top: 0.5em !important;
+        margin-top: 0.25em !important;
     }
     #conv_list table {
         border: none !important;
@@ -2369,25 +2505,23 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     }
     /* Hide scrollbar but keep functionality */
     #conv_list > div {
-        scrollbar-width: none !important;  /* Firefox */
-        -ms-overflow-style: none !important;  /* IE and Edge */
-        height: calc(100vh - 380px) !important;
+        scrollbar-width: none !important;
+        -ms-overflow-style: none !important;
+        height: calc(100vh - 370px) !important;
         overflow-y: auto !important;
+        overflow-x: hidden !important;
     }
     #conv_list > div::-webkit-scrollbar {
-        display: none !important;  /* Chrome, Safari, Opera */
+        display: none !important;
     }
     .gradio-container {
         max-width: 100% !important;
     }
-    .gradio-footer {
-        display: none !important;
-    }
-    footer {
+    .gradio-footer, footer {
         display: none !important;
     }
     #xeno_logo {
-        margin: 0.5em auto !important;
+        margin: 0.25em auto !important;
         display: block !important;
         max-width: 60% !important;
         padding: 0 !important;
@@ -2403,23 +2537,26 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         object-fit: contain !important;
         margin: 0 auto !important;
         display: block !important;
+        width: 250px !important;
+        height: auto !important;
+        max-height: 150px !important;
     }
     /* Adjust spacing for sidebar elements */
     #new_chat_btn {
-        margin: 0.5em 0 !important;
+        margin: 0.25em 0 !important;
     }
     #search_bar {
-        margin: 0.5em 0 !important;
+        margin: 0.25em 0 !important;
     }
     #manage_bots_btn {
-        margin: 1em 0 0.5em 0 !important;
+        margin: 0.5em 0 0.25em 0 !important;
         width: 100% !important;
     }
     #app_footer {
         text-align: center !important;
         width: 100% !important;
         padding: 0.5em 0 !important;
-        margin-top: 1em !important;
+        margin-top: 0.5em !important;
         color: #666 !important;
         font-size: 0.8em !important;
         border-top: 1px solid #eee !important;
@@ -2489,47 +2626,118 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         align-items: center !important;
         gap: 1em !important;
     }
+    /* Button hover animations */
+    .round-button {
+        border-radius: 50% !important;
+        padding: 8px !important;
+        min-width: 40px !important;
+        max-width: 40px !important;
+        height: 40px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background-color: transparent !important;
+        border: 1px solid #ccc !important;
+        transition: all 0.3s ease !important;
+        cursor: pointer !important;
+    }
+    
+    .round-button:hover {
+        transform: scale(1.1) !important;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1) !important;
+        background-color: rgba(0, 0, 0, 0.05) !important;
+    }
+    
+    .round-button:active {
+        transform: scale(0.95) !important;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+    }
 """, title="MIDAS 2.0") as demo:
 
     current_conversation = gr.State()
     current_model = gr.State()
+    overlay_visible = gr.State(False)
     
     with gr.Row():
         with gr.Column(scale=1):
-            with gr.Group():
-                # Add Xeno logo at the top
-                gr.Image(
-                    "xeno.png",
-                    show_label=False,
-                    container=False,
-                    show_download_button=False,
-                    height=100,
-                    elem_id="xeno_logo"
-                )
-                
-                # New chat button
-                new_conv_btn = gr.Button(" New Chat", variant="primary")
-                
-                # Search bar for conversations
-                search_bar = gr.Textbox(
-                    placeholder="Search conversations...", 
-                    show_label=False,
-                    container=False
-                )
-                
-                # Conversation list
-                conv_list = gr.Dataframe(
-                    headers=["title"],
-                    datatype=["str"],
-                    row_count=10,
-                    interactive=False,
-                    wrap=True,
-                    column_widths=["100%"]
-                )
-                
-                # Manage Bots button
-                manage_bots_btn = gr.Button(" Manage Bots", variant="secondary")
+            # Add Xeno logo at the top
+            gr.Image(
+                "xeno.png",
+                show_label=False,
+                container=False,
+                show_download_button=False,
+                show_fullscreen_button=False,
+                height=100,
+                elem_id="xeno_logo"
+            )
             
+            # Manage Bots button
+            gr.HTML(f"""
+                <style>
+                    /* Manage Bots Button Styling */
+                    #manage_bots_btn {{
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        padding: 8px 12px !important;
+                    }}
+                    #manage_bots_btn img {{
+                        width: 24px;
+                        height: 24px;
+                        object-fit: contain;
+                    }}
+                </style>
+            """)
+            
+            manage_bots_btn = gr.Button(
+                value="Manage Bots", 
+                elem_id="manage_bots_btn", 
+                icon=os.path.join(os.path.dirname(__file__), "ui-assets", "bot-setting.png")
+            )
+            
+            # New chat button
+            gr.HTML(f"""
+                <style>
+                    /* New Chat Button Styling */
+                    #new_chat_btn {{
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        padding: 8px 12px !important;
+                        margin-top: 10px !important;  /* Increased spacing */
+                    }}
+                    #new_chat_btn img {{
+                        width: 24px;
+                        height: 24px;
+                        object-fit: contain;
+                    }}
+                </style>
+            """)
+            
+            new_conv_btn = gr.Button(
+                value="New Chat", 
+                elem_id="new_chat_btn", 
+                icon=os.path.join(os.path.dirname(__file__), "ui-assets", "chat.png")
+            )
+            
+            # Search bar for conversations
+            search_bar = gr.Textbox(
+                placeholder="Search conversations...", 
+                show_label=False,
+                container=False
+            )
+            
+            # Conversation list
+            conv_list = gr.Dataframe(
+                headers=["title"],
+                datatype=["str"],
+                row_count=5,
+                interactive=False,
+                wrap=False,
+                column_widths=["100%"],
+                elem_id="conv_list"
+            )
+        
         with gr.Column(scale=3):
             # Get available models and format them
             available_models = [get_model_display_name(m) for m in get_available_models()]  # Ollama models
@@ -2540,6 +2748,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 choices=all_models,
                 value=get_default_model(),  # Use the default model from settings
                 label="Model",
+                show_label=False,
                 interactive=True,
                 elem_id="model_selector"
             )
@@ -2548,77 +2757,60 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             with gr.Row():
                 chat_title = gr.Textbox(
                     label="Conversation", 
-                    interactive=False,  # Make non-editable by default
+                    interactive=True,  # Make non-editable by default
                     show_label=False,
                     container=False,
-                    elem_id="chat_title"
+                    elem_id="chat_title",
+                    scale=5
                 )
-                rename_chat_btn = gr.Button("Rename", variant="secondary")
-                rename_chat_input = gr.Textbox(
-                    label="New Title", 
-                    visible=False,  # Hidden by default
-                    interactive=True
-                )
-                confirm_rename_btn = gr.Button(
-                    "Confirm", 
-                    variant="primary", 
-                    visible=False  # Hidden by default
-                )
-
+                rename_conv_btn = gr.Button("", variant="secondary", scale=0.5, icon=os.path.join(os.path.dirname(__file__), "ui-assets", "edit.png"))
+                delete_conv_btn = gr.Button("", variant="stop", scale=0.5, icon=os.path.join(os.path.dirname(__file__), "ui-assets", "delete.png"))
+                confirm_rename_btn = gr.Button("Save", variant="primary", scale=0.5, visible=False)  # Save button
+                
             # Rename button click logic
-            def toggle_rename_input():
+            def toggle_rename_mode(current_title):
                 return {
-                    rename_chat_input: gr.update(visible=True),
-                    confirm_rename_btn: gr.update(visible=True)
+                    rename_conv_btn: gr.update(visible=False),
+                    confirm_rename_btn: gr.update(visible=True),
+                    chat_title: gr.update(interactive=True)
                 }
-
-            rename_chat_btn.click(
-                fn=toggle_rename_input,
-                outputs=[rename_chat_input, confirm_rename_btn]
-            )
-
-            # Confirm rename logic
-            def confirm_rename(current_chat_title, new_title):
+            
+            def confirm_rename(current_conversation, new_title):
                 if not new_title:
-                    return current_chat_title, gr.update(visible=False), gr.update(visible=False), conv_list
+                    return {
+                        chat_title: gr.update(interactive=False),
+                        rename_conv_btn: gr.update(visible=True),
+                        confirm_rename_btn: gr.update(visible=False),
+                        conv_list: format_conversation_list()
+                    }
                 
-                # Get conversation ID from title
-                conn = sqlite3.connect('conversations.db')
-                c = conn.cursor()
+                # Rename the conversation
+                rename_current_chat(current_conversation, new_title)
                 
-                # Directly query for the conversation ID by title
-                c.execute('''SELECT id FROM conversations 
-                             WHERE title = ? 
-                             ORDER BY created_at DESC 
-                             LIMIT 1''', (current_chat_title,))
-                
-                conv_result = c.fetchone()
-                conn.close()
-                
-                if not conv_result:
-                    print(f"No conversation found with title: {current_chat_title}")
-                    return current_chat_title, gr.update(visible=False), gr.update(visible=False), conv_list
-                
-                # Get the conversation ID
-                conv_id = conv_result[0]
-                
-                # Update the conversation title
-                rename_current_chat(conv_id, new_title)
-                # Get updated conversation list
-                updated_conversations = format_conversation_list()
-                return new_title, gr.update(visible=False), gr.update(visible=False), updated_conversations
-                
+                return {
+                    chat_title: gr.update(interactive=False, value=new_title),
+                    rename_conv_btn: gr.update(visible=True),
+                    confirm_rename_btn: gr.update(visible=False),
+                    conv_list: format_conversation_list()
+                }
+            
+            # Bind rename functionality
+            rename_conv_btn.click(
+                fn=toggle_rename_mode,
+                inputs=[chat_title],
+                outputs=[rename_conv_btn, confirm_rename_btn, chat_title]
+            )
+            
             confirm_rename_btn.click(
                 fn=confirm_rename,
-                inputs=[chat_title, rename_chat_input],
-                outputs=[chat_title, rename_chat_input, confirm_rename_btn, conv_list]
+                inputs=[current_conversation, chat_title],
+                outputs=[chat_title, rename_conv_btn, confirm_rename_btn, conv_list]
             )
-
+            
             # Conversation options right under the title
             with gr.Row():
-                with gr.Column(scale=1):
-                    delete_conv_btn = gr.Button(" Delete Current Conversation", variant="stop")
-            
+                pass
+
             # Chatbot interface
             chatbot = gr.Chatbot(
                 label="Conversation", 
@@ -2628,30 +2820,95 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 bubble_full_width=False
             )
             
-            # Message input and submit area
-            with gr.Row():
-                msg_box = gr.Textbox(
-                    label="Message", 
-                    show_label=False, 
-                    container=False,
-                    placeholder="Type your message here...",
-                    lines=3
-                )
-                submit_btn = gr.Button("Send", variant="primary")
+            # Message input area with integrated controls
+            with gr.Row(variant="panel"):
+                with gr.Column(scale=12):
+                    # Document info overlay (hidden by default)
+                    with gr.Row(visible=False, elem_classes=["doc-info-overlay"]) as doc_info_overlay:
+                        with gr.Column():
+                            gr.Markdown("📄 **Document uploaded**")
+                            with gr.Row():
+                                doc_name_display = gr.Markdown("")
+                                remove_btn = gr.Button("❌", elem_classes=["remove-button"])
+
+                    # Chat input
+                    msg_box = gr.Textbox(
+                        show_label=False,
+                        placeholder="Enter text and press enter, or upload a document",
+                        elem_id="input_box"
+                    )
+                    
+                    # Chat control buttons centered under the input bar
+                    with gr.Row(elem_classes=["round-button-row"]):
+                        with gr.Column(scale=11):
+                            pass  # Placeholder to push buttons to the right
+                        with gr.Column(scale=1):
+                            with gr.Row(elem_classes=["buttons-row"]):
+                                file_upload = gr.UploadButton(
+                                    "",  # Empty text since we'll use image
+                                    file_types=[".pdf", ".txt", ".doc", ".docx"],
+                                    label="Add Attachment",
+                                    size="sm",
+                                    elem_id="file_upload_button",
+                                    elem_classes=["round-button", "image-button"]
+                                )
+                                submit_btn = gr.Button(
+                                    "",  # Empty text since we'll use image
+                                    variant="primary",
+                                    size="sm",
+                                    elem_id="send_button",
+                                    elem_classes=["round-button", "image-button"]
+                                )
             
-            # File upload component
-            with gr.Row():
-                file_upload = gr.File(
-                    label="Upload Document",
-                    file_types=[".pdf", ".txt", ".doc", ".docx"],
-                    type="filepath"
-                )
-                upload_status = gr.Markdown()
-
-            # Hidden components for state management
-            current_conversation = gr.State(None)
-            current_model = gr.State("llama3.1:8b")
-
+            # Upload status (hidden by default)
+            upload_status = gr.Markdown(visible=False)
+            
+            # Add custom CSS for round buttons, layout and overlay
+            file_upload_base64 = base64.b64encode(open("ui-assets/file-upload.png", "rb").read()).decode('utf-8')
+            send_base64 = base64.b64encode(open("ui-assets/send.png", "rb").read()).decode('utf-8')
+            gr.HTML(f"""
+                <style>
+                    /* Round buttons */
+                    .round-button {{
+                        border-radius: 50% !important;
+                        padding: 8px !important;
+                        min-width: 40px !important;
+                        max-width: 40px !important;
+                        height: 40px !important;
+                        display: flex !important;
+                        align-items: center !important;
+                        justify-content: center !important;
+                        background-color: transparent !important;
+                        border: 1px solid #ccc !important;
+                        transition: all 0.3s ease !important;
+                        cursor: pointer !important;
+                    }}
+                    
+                    /* Image buttons */
+                    .image-button {{
+                        background-size: 20px 20px !important;
+                        background-repeat: no-repeat !important;
+                        background-position: center !important;
+                    }}
+                    
+                    #file_upload_button {{
+                        background-image: url('data:image/png;base64,{file_upload_base64}') !important;
+                    }}
+                    
+                    #send_button {{
+                        background-image: url('data:image/png;base64,{send_base64}') !important;
+                    }}
+                    
+                    /* Button row styling */
+                    .buttons-row {{
+                        display: flex !important;
+                        justify-content: flex-end !important;
+                        align-items: center !important;
+                        gap: 10px !important;
+                    }}
+                </style>
+            """)
+    
     # Manage Bots Dialog
     manage_bots_dialog = gr.Group(visible=False)
     
@@ -2766,8 +3023,8 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                     ],
                     outputs=[
                         existing_bots_df,  # Existing bots list
-                        bot_name_dropdown,  # Bot name dropdown
-                        base_model,        # Base model dropdown
+                        bot_name_dropdown,  # Bot name dropdown update
+                        base_model,        # Base model dropdown update
                         save_status,       # Save status
                         model_dropdown     # Model dropdown update
                     ]
@@ -2867,7 +3124,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         lambda: [
             None,  # current_conversation
             [],    # chatbot
-            "llama3.1:8b",  # model
+            get_default_model(),  # model
             "Untitled Conversation",  # initial title
             format_conversation_list()  # conversation list
         ],
@@ -2880,6 +3137,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         ]
     )
     
+    
     def submit_message(message, history, conv_id, model_name):
         """
         Submit a message to the chat, with special handling for SDXL image generation
@@ -2891,16 +3149,17 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             model_name (str): Selected model/mode
         
         Returns:
-            tuple: Updated outputs for Gradio interface
+        tuple: Updated outputs for Gradio interface
         """
         # Ensure conversation ID is valid
         if not conv_id:
             conv_id = create_conversation(message, model_name)
         
-        # Get relevant context for non-SDXL models
+        # Get relevant context from documents
         context = get_relevant_context(message, conv_id)
+        print(f"Retrieved context for conversation {conv_id}")
         
-        # Check if SDXL image generation is requested
+        # Handle SDXL image generation
         if model_name == "SDXL":
             try:
                 # Parse SDXL commands
@@ -2933,11 +3192,35 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 # Ensure conversations directory exists
                 os.makedirs('conversations', exist_ok=True)
                 
-                # Save the image and create markdown
-                os.makedirs(f'conversations/{conv_id}', exist_ok=True)
-                image_filename = f'conversations/{conv_id}/image_{uuid.uuid4()}.png'
+                # Define image filename using datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                image_filename = f'conversations/{conv_id}/generated_image_{timestamp}.png'
+                
+                # Ensure the directory exists
+                os.makedirs(os.path.dirname(image_filename), exist_ok=True)
+                
+                # Save the image
                 image.save(image_filename)
-                image_markdown = f"![Generated Image](file/{image_filename})"
+                
+                # Detailed logging and error handling
+                try:
+                    # Verify image was saved
+                    if not os.path.exists(image_filename):
+                        raise IOError(f"Failed to save image: {image_filename}")
+                    
+                    # Debug: Print absolute path and file details
+                    abs_image_path = os.path.abspath(image_filename)
+                    print(f"Generated Image Path: {abs_image_path}")
+                    print(f"Image File Size: {os.path.getsize(abs_image_path)} bytes")
+                    
+                    # Use gradio_api/file for serving the image
+                    relative_path = os.path.relpath(abs_image_path, os.getcwd())
+                    image_markdown = f"![Generated Image](/gradio_api/file={relative_path})"
+                
+                except Exception as save_error:
+                    print(f"Image save error: {save_error}")
+                    traceback.print_exc()
+                    image_markdown = f"❌ Image generation failed: {str(save_error)}"
                 
                 # Update history with the actual image
                 history[-1] = (message, image_markdown)
@@ -3023,7 +3306,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 save_message(conv_id, model_name, "assistant", error_msg)
                 
                 yield history, "", get_chat_title(conv_id), format_conversation_list()
-    
+        
     submit_btn.click(
         submit_message,
         inputs=[
@@ -3124,7 +3407,11 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     file_upload.upload(
         fn=handle_file_upload,
         inputs=[file_upload, current_conversation],
-        outputs=[upload_status]
+        outputs=[upload_status, doc_name_display, overlay_visible, current_conversation]
+    ).then(
+        fn=lambda x: gr.update(visible=x),
+        inputs=[overlay_visible],
+        outputs=[doc_info_overlay]
     )
 
     delete_bot_btn.click(
@@ -3153,7 +3440,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     # Image generation handler
     def generate_image_from_prompt(prompt, width, height):
         try:
-            image = comfyui.generate_image(prompt, width, height)
+            image = comfyui.generate_image(prompt, width=width, height=height)
             return image
         except Exception as e:
             raise gr.Error(f'Image generation failed: {str(e)}')
@@ -3245,6 +3532,70 @@ def parse_sdxl_commands(message):
     
     return params, clean_prompt
 
+def remove_document(filename, conversation_id=None):
+        """Remove a document from the RAG system
+    
+        Args:
+            filename (str): Name of the file to remove
+            conversation_id (str, optional): Current conversation ID
+        
+        Returns:
+            tuple: (status_message, document_name, visibility_state)
+        """
+        try:
+            if not filename or not conversation_id:
+                return "No document selected", "", False
+                
+            # Mark document as deleted in database
+            conn = sqlite3.connect('conversations.db')
+            c = conn.cursor()
+            
+            # Get document info
+            c.execute('''
+                SELECT id, filename, embedding_path 
+                FROM documents 
+                WHERE original_name = ? AND conversation_id = ?
+            ''', (filename.replace("**", ""), conversation_id))
+            
+            doc = c.fetchone()
+            if not doc:
+                conn.close()
+                return f"Document not found: {filename}", "", False
+                
+            doc_id, file_path, embedding_path = doc
+            
+            # Update document status
+            c.execute('''
+                UPDATE documents 
+                SET deleted = 1 
+                WHERE id = ?
+            ''', (doc_id,))
+            
+            if c.rowcount == 0:
+                conn.close()
+                return f"Document not found: {filename}", "", False
+            
+            conn.commit()
+            conn.close()
+            
+            return "Document marked for deletion", "", False
+            
+        except Exception as e:
+            print(f"Error marking document for deletion: {e}")
+            traceback.print_exc()
+            return f"Error marking document for deletion: {str(e)}", filename, True
+
+with gr.Blocks():
+    remove_btn.click(
+        fn=remove_document,
+        inputs=[doc_name_display, current_conversation],
+        outputs=[upload_status, doc_name_display, overlay_visible]
+    ).then(
+        fn=lambda x: gr.update(visible=x),
+        inputs=[overlay_visible],
+        outputs=[doc_info_overlay]
+    )
+
 if __name__ == "__main__":
     # Initialize databases
     init_db()
@@ -3255,4 +3606,437 @@ if __name__ == "__main__":
     os.makedirs('bot_embeddings', exist_ok=True)
     
     # Start the Gradio interface
-    demo.queue().launch(server_name="0.0.0.0", share=False, allowed_paths=["."], favicon_path="favicon.ico")
+    demo.queue().launch(server_name="0.0.0.0", share=False, allowed_paths=[".", "/conversations"], favicon_path="favicon.ico")
+
+def cleanup_deleted_documents():
+    """Clean up documents marked for deletion"""
+    try:
+        conn = sqlite3.connect('conversations.db')
+        c = conn.cursor()
+        
+        # Get all deleted documents
+        c.execute('''
+            SELECT id, filename, embedding_path 
+            FROM documents 
+            WHERE deleted = 1
+        ''')
+        
+        deleted_docs = c.fetchall()
+        
+        for doc_id, file_path, embedding_path in deleted_docs:
+            try:
+                # Remove files if they exist
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                if os.path.exists(embedding_path):
+                    shutil.rmtree(os.path.dirname(embedding_path))
+                    
+                # Remove from database
+                c.execute('DELETE FROM documents WHERE id = ?', (doc_id,))
+                
+            except Exception as e:
+                print(f"Warning: Error cleaning up document {doc_id}: {e}")
+        
+        conn.commit()
+        conn.close()
+        
+    except Exception as e:
+        print(f"Error during document cleanup: {e}")
+        traceback.print_exc()
+
+# Register cleanup functions to run at exit
+atexit.register(cleanup_deleted_documents)
+
+def cleanup_temp_files():
+    """Clean up temporary files and directories"""
+    try:
+        temp_dir = os.path.join(os.getcwd(), 'temp_uploads')
+        if os.path.exists(temp_dir):
+            print(f"Cleaning up temporary directory: {temp_dir}")
+            shutil.rmtree(temp_dir)
+            
+        # Clear temporary documents dictionary
+        temp_documents.clear()
+        
+    except Exception as e:
+        print(f"Error cleaning up temporary files: {e}")
+        traceback.print_exc()
+
+# Register cleanup functions to run at exit
+atexit.register(cleanup_deleted_documents)
+atexit.register(cleanup_temp_files)
+
+# Global dictionary to store temporary documents
+temp_documents = {}
+
+def handle_file_upload(file_obj, conversation_id=None):
+    """Handle file upload from Gradio interface
+    
+    Args:
+        file_obj: Gradio file object
+        conversation_id (int, optional): Current conversation ID
+    
+    Returns:
+        tuple: (status_message, document_name, overlay_visibility_state, conversation_id)
+    """
+    try:
+        print(f"\nHandling file upload for conversation ID: {conversation_id}")
+        
+        if file_obj is None:
+            print("No file object provided")
+            return "", "", False, conversation_id
+            
+        original_name = os.path.basename(file_obj)
+        print(f"Processing file: {original_name}")
+        
+        # Create temporary directory if it doesn't exist
+        temp_dir = os.path.join(os.getcwd(), 'temp_uploads')
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Copy file to temporary location
+        file_ext = os.path.splitext(original_name)[1]
+        temp_filename = f"{str(uuid.uuid4())}{file_ext}"
+        
+        temp_path = os.path.join(temp_dir, temp_filename)
+        
+        shutil.copy2(file_obj, temp_path)
+        
+        # Create embeddings in temporary location
+        temp_embeddings_dir = os.path.join(temp_dir, f"embeddings_{temp_filename}")
+        
+        try:
+            # Load and chunk the document
+            if file_ext.lower() == '.pdf':
+                loader = PyPDFLoader(temp_path)
+            else:
+                loader = TextLoader(temp_path)
+                
+            documents = loader.load()
+            text_splitter = RecursiveCharacterTextSplitter()
+            chunks = text_splitter.split_documents(documents)
+            
+            # Create and persist embeddings
+            db = Chroma.from_documents(
+                documents=chunks,
+                embedding=HuggingFaceEmbeddings(),
+                persist_directory=temp_embeddings_dir
+            )
+            db.persist()
+            print("Vector store created and persisted")
+            
+            # Store document info in temporary dictionary
+            doc_info = {
+                'original_name': original_name,
+                'temp_path': temp_path,
+                'embedding_path': temp_embeddings_dir,
+                'file_type': file_ext,
+                'timestamp': datetime.now()
+            }
+            
+            # Use conversation ID as key if exists, otherwise use a temporary ID
+            storage_key = conversation_id if conversation_id else str(uuid.uuid4())
+            if storage_key not in temp_documents:
+                temp_documents[storage_key] = []
+            temp_documents[storage_key].append(doc_info)
+            
+            return f"Successfully processed {original_name}", f"**{original_name}**", True, conversation_id
+            
+        except Exception as e:
+            print(f"Error processing document: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            if os.path.exists(temp_embeddings_dir):
+                shutil.rmtree(temp_embeddings_dir)
+            raise
+            
+    except Exception as e:
+        print(f"Error handling file upload: {e}")
+        traceback.print_exc()
+        return f"Error uploading file: {str(e)}", "", False, conversation_id
+
+def process_temp_documents(conversation_id):
+    """Process temporary documents and associate them with a conversation
+    
+    Args:
+        conversation_id (int): Conversation ID to associate documents with
+    """
+    if not conversation_id:
+        return
+        
+    try:
+        # Check for documents in temporary storage
+        docs = []
+        for key in list(temp_documents.keys()):
+            if key == conversation_id or not isinstance(key, int):
+                docs.extend(temp_documents[key])
+                del temp_documents[key]
+        
+        if not docs:
+            return
+            
+        # Save documents to database
+        conn = sqlite3.connect('conversations.db')
+        c = conn.cursor()
+        
+        for doc in docs:
+            # Move files to permanent location
+            uploads_dir = os.path.join(os.getcwd(), 'uploads')
+            os.makedirs(uploads_dir, exist_ok=True)
+            
+            permanent_filename = f"{str(uuid.uuid4())}{doc['file_type']}"
+            permanent_path = os.path.join(uploads_dir, permanent_filename)
+            permanent_embeddings_dir = os.path.join(uploads_dir, f"embeddings_{permanent_filename}")
+            
+            # Move files
+            shutil.move(doc['temp_path'], permanent_path)
+            shutil.move(doc['embedding_path'], permanent_embeddings_dir)
+            
+            # Save to database
+            c.execute('''INSERT INTO documents 
+                         (filename, original_name, file_type, embedding_path, conversation_id)
+                         VALUES (?, ?, ?, ?, ?)''', 
+                      (permanent_filename, doc['original_name'], doc['file_type'], os.path.join(permanent_embeddings_dir, 'index'), conversation_id))
+        
+        conn.commit()
+        conn.close()
+        
+    except Exception as e:
+        print(f"Error processing temporary documents: {e}")
+        traceback.print_exc()
+
+def submit_message(message, history, conv_id, model_name):
+    """Submit a message to the chat
+    
+    Args:
+        message (str): User's input message
+        history (list): Current conversation history
+        conv_id (str): Conversation ID
+        model_name (str): Selected model/mode
+    
+    Returns:
+        tuple: Updated outputs for Gradio interface
+    """
+    if not message:
+        return history, "", get_chat_title(conv_id), format_conversation_list()
+    
+    try:
+        # Create new conversation if needed
+        if not conv_id:
+            conv_id = create_conversation(message, model_name)
+            if not conv_id:
+                error_msg = "Failed to create new conversation"
+                history.append((message, error_msg))
+                return history, "", "Error", format_conversation_list()
+            print(f"Created new conversation with ID: {conv_id}")
+            
+            # Process any temporary documents
+            process_temp_documents(conv_id)
+        
+        # Get relevant context from documents
+        context = get_relevant_context(message, conv_id)
+        print(f"Retrieved context for conversation {conv_id}")
+        
+        # Handle SDXL image generation
+        if model_name == "SDXL":
+            try:
+                # Add message to history with loading indicator
+                history.append((message, "Generating image..."))
+                save_message(conv_id, model_name, "user", message)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+            except Exception as e:
+                error_msg = f"Image generation failed: {str(e)}"
+                print(error_msg)
+                
+                # Update history with error
+                if len(history) > 0 and history[-1][1] == "Generating image...":
+                    history[-1] = (message, error_msg)
+                else:
+                    history.append((message, error_msg))
+                
+                # Save error messages
+                save_message(conv_id, model_name, "user", message)
+                save_message(conv_id, model_name, "assistant", error_msg)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+        
+        # Default behavior for non-SDXL models
+        else:
+            try:
+                # Generate response using the model with context
+                response_generator = generate_response(message, model_name, history, conv_id, context=context)
+                
+                # Add user message to history
+                history.append((message, ""))
+                save_message(conv_id, model_name, "user", message)
+                
+                # Generate title if it's a new conversation
+                if get_chat_title(conv_id) == "Untitled Conversation":
+                    title = generate_conversation_title(message, "", model_name)
+                    update_conversation_title(conv_id, title)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
+                # Stream the response
+                full_response = ""
+                for response in response_generator:
+                    if response and isinstance(response, tuple):
+                        _, updated_history, current_conv_id = response
+                        # Update the response in history
+                        if len(updated_history) > 0:
+                            full_response = updated_history[-1][1]
+                            history[-1] = (message, full_response)
+                            yield history, "", get_chat_title(current_conv_id), format_conversation_list()
+                
+                # Save the final response
+                save_message(conv_id, model_name, "assistant", full_response)
+                
+                # Update title if still untitled
+                if get_chat_title(conv_id) == "Untitled Conversation":
+                    title = generate_conversation_title(message, full_response, model_name)
+                    update_conversation_title(conv_id, title)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
+            except Exception as e:
+                error_msg = f"Error generating response: {str(e)}"
+                print(error_msg)
+                print(traceback.format_exc())
+                
+                # Update history with error
+                if len(history) > 0 and history[-1][0] == message:
+                    history[-1] = (message, error_msg)
+                else:
+                    history.append((message, error_msg))
+                
+                # Save error messages
+                save_message(conv_id, model_name, "user", message)
+                save_message(conv_id, model_name, "assistant", error_msg)
+                
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+        
+    except Exception as e:
+        print(f"Error submitting message: {e}")
+        traceback.print_exc()
+        error_msg = "I apologize, but I encountered an error while processing your request."
+        history.append((message, error_msg))
+        yield history, "", get_chat_title(conv_id), format_conversation_list()
+
+gr.HTML(f"""
+    <style>
+        /* Minimalistic and Round Scrollbar Styling */
+        * {{
+            scrollbar-width: thin;  /* For Firefox */
+            scrollbar-color: rgba(128, 128, 128, 0.5) transparent;  /* For Firefox */
+        }}
+
+        /* Webkit (Chrome, Safari, newer versions of Opera) */
+        *::-webkit-scrollbar {{
+            width: 8px;  /* Thin scrollbar */
+            height: 8px;  /* Horizontal scrollbar */
+        }}
+
+        *::-webkit-scrollbar-track {{
+            background: transparent;  /* Transparent track */
+            border-radius: 10px;
+        }}
+
+        *::-webkit-scrollbar-thumb {{
+            background-color: rgba(128, 128, 128, 0.5);  /* Semi-transparent gray */
+            border-radius: 10px;  /* Fully rounded scrollbar */
+            border: 2px solid transparent;  /* Creates a slight padding effect */
+            background-clip: content-box;  /* Ensures border doesn't affect size */
+        }}
+
+        *::-webkit-scrollbar-thumb:hover {{
+            background-color: rgba(128, 128, 128, 0.7);  /* Slightly darker on hover */
+        }}
+
+        /* Ensure specific areas like conversation list and chat history have scrollbars */
+        #conversations_list,
+        .gradio-container .chatbot,
+        .gradio-container .upload-container {{
+            scrollbar-width: thin;
+            scrollbar-color: rgba(128, 128, 128, 0.5) transparent;
+        }}
+    </style>
+""")
+
+gr.HTML(f"""
+    <style>
+        /* Xeno logo styling */
+        .xeno-logo-container {{
+            margin-bottom: 5px !important;  /* Reduced vertical spacing */
+        }}
+        .xeno-logo {{
+            width: 250px !important;
+            height: auto !important;
+            max-height: 150px !important;
+        }}
+        
+        /* New Chat Button Styling */
+        #new_chat_btn {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px !important;
+            margin-top: -5px !important;  /* Pull the button up slightly */
+        }}
+        #new_chat_btn img {{
+            width: 24px;
+            height: 24px;
+            object-fit: contain;
+        }}
+    </style>
+""")
+
+gr.HTML(f"""
+    <style>
+        /* Conversation List and Manage Bots Button Spacing */
+        .conversations-container {{
+            gap: 2px !important;  /* Reduced gap between elements */
+        }}
+        #conversations_list {{
+            margin-bottom: 0 !important;  /* Remove bottom margin */
+        }}
+        #manage_bots_btn {{
+            margin-top: -10px !important;  /* Pull the button up more */
+            padding: 6px 10px !important;  /* Reduce button padding */
+        }}
+    </style>
+""")
+
+gr.HTML(f"""
+    <style>
+        /* Manage Bots Button Styling */
+        #manage_bots_btn {{
+            margin: 0.25em 0 0 0 !important;  /* Reduced top and bottom margins */
+            width: 100% !important;
+        }}
+    </style>
+""")
+
+gr.HTML(f"""
+    <style>
+        /* Conversation List and Manage Bots Button Spacing */
+        .conversations-container {{
+            display: flex;
+            flex-direction: column;
+            gap: 2px !important;  /* Reduced gap between elements */
+        }}
+        #conversations_list {{
+            margin-bottom: 0 !important;  /* Remove bottom margin */
+        }}
+        #manage_bots_btn {{
+            order: -1;  /* Move Manage Bots button to the top */
+            margin-top: 0 !important;  /* Reset top margin */
+            margin-bottom: 5px !important;  /* Add some space below */
+            padding: 6px 10px !important;  /* Reduce button padding */
+            width: 100% !important;
+        }}
+        #new_chat_btn {{
+            order: 0;  /* Keep New Chat button in its original order */
+            margin-top: 0 !important;  /* Reset top margin */
+        }}
+    </style>
+""")
