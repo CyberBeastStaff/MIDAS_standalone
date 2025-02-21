@@ -1047,9 +1047,12 @@ def load_conversation(conv_id):
                     match = re.search(r'!\[Generated Image\]\((file/)?(.+)\)', content)
                     if match:
                         image_path = match.group(2)
-                        # Remove any 'file/' prefix if it exists and add it back
-                        image_path = image_path.replace('file/', '')
-                        content = f"![Generated Image](/gradio_api/file={image_path})"
+                        # Remove any 'file/' or 'gradio_api/file=' prefix if it exists
+                        image_path = re.sub(r'^(file/|gradio_api/file=)', '', image_path)
+                        # Ensure the path starts with '/gradio_api/file='
+                        if not image_path.startswith('/gradio_api/file='):
+                            image_path = f'/gradio_api/file={image_path}'
+                        content = f"![Generated Image]({image_path})"
                 current_assistant_msg = content
         
         # Add the last message pair if it exists
@@ -1124,12 +1127,15 @@ def get_conversation_details(conv_id):
                 has_generated_image = True
                 # Extract the image path
                 import re
-                match = re.search(r'!\[Generated Image\]\((file/)?(.+)\)', content)
+                match = re.search(r'!\[Generated Image\]\((file/|gradio_api/file=)?(.+)\)', content)
                 if match:
                     image_path = match.group(2)
-                    # Remove any 'file/' prefix if it exists and add it back
-                    image_path = image_path.replace('file/', '')
-                    content = f"![Generated Image](file/{image_path})"
+                    # Remove any 'file/' or 'gradio_api/file=' prefix if it exists
+                    image_path = re.sub(r'^(file/|gradio_api/file=)', '', image_path)
+                    # Ensure the path starts with 'gradio_api/file='
+                    if not image_path.startswith('gradio_api/file='):
+                        image_path = f'gradio_api/file={image_path}'
+                    content = f"![Generated Image]({image_path})"
             
             messages.append({
                 'role': role,
@@ -3213,7 +3219,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                     print(f"Generated Image Path: {abs_image_path}")
                     print(f"Image File Size: {os.path.getsize(abs_image_path)} bytes")
                     
-                    # Use gradio_api/file for serving the image
+                    # Use gradio_api/file= for serving the image
                     relative_path = os.path.relpath(abs_image_path, os.getcwd())
                     image_markdown = f"![Generated Image](/gradio_api/file={relative_path})"
                 
