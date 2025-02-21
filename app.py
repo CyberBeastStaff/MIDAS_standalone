@@ -305,7 +305,7 @@ def get_model_version(model_name):
     Get the correct version suffix for a model
     
     Args:
-        model_name (str): Model name or full model name
+        model_name (str): Model to use for the conversation
     
     Returns:
         str: Full model name with correct version
@@ -425,6 +425,8 @@ def generate_response(message, model, chat_history, conv_id, context=None):
     Returns:
         tuple: Empty string, updated chat history, conversation ID
     """
+    global generation_active
+    generation_active = True
     try:
         # Check if this is a bot or a base model
         bot_config = get_bot_by_name(model)
@@ -518,6 +520,8 @@ Please answer the user's question:"""
                     "stop": ["</s>", "user:", "User:", "assistant:", "Assistant:"]
                 }
             ):
+                if not generation_active:
+                    break
                 if chunk['message']['content']:
                     response += chunk['message']['content']
                     response_lines.append(chunk['message']['content'])
@@ -2555,7 +2559,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         margin: 0.25em 0 !important;
     }
     #manage_bots_btn {
-        margin: 0.5em 0 0.25em 0 !important;
+        margin: 4px 0 0 0 !important;  /* Increased spacing */
         width: 100% !important;
     }
     #app_footer {
@@ -2667,16 +2671,11 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     with gr.Row():
         with gr.Column(scale=1):
             # Add Xeno logo at the top
-            gr.Image(
-                "xeno.png",
-                show_label=False,
-                container=False,
-                show_download_button=False,
-                show_fullscreen_button=False,
-                height=100,
-                elem_id="xeno_logo"
-            )
-            
+            gr.HTML("""
+                <div class="xeno-logo-container">
+                    <img src="gradio_api/file=xeno.png" alt="Xeno Logo" class="xeno-logo">
+                </div>
+            """)
             # Manage Bots button
             gr.HTML(f"""
                 <style>
@@ -2865,6 +2864,14 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                                     elem_id="send_button",
                                     elem_classes=["round-button", "image-button"]
                                 )
+                                stop_btn = gr.Button(
+                                    "",  # Empty text since we'll use image
+                                    variant="stop",
+                                    size="sm",
+                                    elem_id="stop_button",
+                                    elem_classes=["round-button", "image-button"],
+                                    visible=False
+                                )
             
             # Upload status (hidden by default)
             upload_status = gr.Markdown(visible=False)
@@ -2872,6 +2879,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             # Add custom CSS for round buttons, layout and overlay
             file_upload_base64 = base64.b64encode(open("ui-assets/file-upload.png", "rb").read()).decode('utf-8')
             send_base64 = base64.b64encode(open("ui-assets/send.png", "rb").read()).decode('utf-8')
+            stop_base64 = base64.b64encode(open("ui-assets/stop.png", "rb").read()).decode('utf-8')
             gr.HTML(f"""
                 <style>
                     /* Round buttons */
@@ -2903,6 +2911,10 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                     
                     #send_button {{
                         background-image: url('data:image/png;base64,{send_base64}') !important;
+                    }}
+                    
+                    #stop_button {{
+                        background-image: url('data:image/png;base64,{stop_base64}') !important;
                     }}
                     
                     /* Button row styling */
@@ -3311,8 +3323,27 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 save_message(conv_id, model_name, "user", message)
                 save_message(conv_id, model_name, "assistant", error_msg)
                 
-                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                yield history, "", get_chat_title(conv_id), format_conversation_list()\
+                
         
+    # Add global variable to track generation state
+    generation_active = False
+
+    def stop_generation():
+        global generation_active
+        generation_active = False
+        return "Generation stopped"
+
+    submit_btn.click(
+        fn=lambda: gr.update(visible=True),
+        outputs=[stop_btn]
+    )
+
+    stop_btn.click(
+        fn=stop_generation,
+        outputs=[msg_box]
+    )
+
     submit_btn.click(
         submit_message,
         inputs=[
@@ -3329,7 +3360,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         ],
         queue=True
     )
-    
+
     msg_box.submit(
         submit_message,
         inputs=[msg_box, chatbot, current_conversation, model_dropdown],
@@ -3845,11 +3876,80 @@ def submit_message(message, history, conv_id, model_name):
         # Handle SDXL image generation
         if model_name == "SDXL":
             try:
-                # Add message to history with loading indicator
+                # Parse SDXL commands
+                sdxl_params, clean_prompt = parse_sdxl_commands(message)
+                
+                # Generate image using ComfyUI
+                global comfyui
+                if comfyui is None:
+                    comfyui = ComfyUIIntegrator()
+                
+                # Apply style if specified
+                if sdxl_params.get('style'):
+                    clean_prompt = f"{clean_prompt} {sdxl_params['style']}"
+                
+                # Add user message to history first
                 history.append((message, "Generating image..."))
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
+                image = comfyui.generate_image(
+                    prompt=clean_prompt,
+                    width=sdxl_params.get('width', 1024),
+                    height=sdxl_params.get('height', 1024),
+                    negative_prompt=sdxl_params.get('negative_prompt', ""),
+                    steps=sdxl_params.get('steps', 30),
+                    cfg=sdxl_params.get('cfg', 7.0),
+                    quality=sdxl_params.get('quality', 1.0),
+                    seed=sdxl_params.get('seed')
+                )
+                
+                # Ensure conversations directory exists
+                os.makedirs('conversations', exist_ok=True)
+                
+                # Define image filename using datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                image_filename = f'conversations/{conv_id}/generated_image_{timestamp}.png'
+                
+                # Ensure the directory exists
+                os.makedirs(os.path.dirname(image_filename), exist_ok=True)
+                
+                # Save the image
+                image.save(image_filename)
+                
+                # Detailed logging and error handling
+                try:
+                    # Verify image was saved
+                    if not os.path.exists(image_filename):
+                        raise IOError(f"Failed to save image: {image_filename}")
+                    
+                    # Debug: Print absolute path and file details
+                    abs_image_path = os.path.abspath(image_filename)
+                    print(f"Generated Image Path: {abs_image_path}")
+                    print(f"Image File Size: {os.path.getsize(abs_image_path)} bytes")
+                    
+                    # Use gradio_api/file= for serving the image
+                    relative_path = os.path.relpath(abs_image_path, os.getcwd())
+                    image_markdown = f"![Generated Image](/gradio_api/file={relative_path})"
+                
+                except Exception as save_error:
+                    print(f"Image save error: {save_error}")
+                    traceback.print_exc()
+                    image_markdown = f"❌ Image generation failed: {str(save_error)}"
+                
+                # Update history with the actual image
+                history[-1] = (message, image_markdown)
+                
+                # Save messages to database
                 save_message(conv_id, model_name, "user", message)
+                save_message(conv_id, model_name, "assistant", image_markdown)
+                
+                # Generate title if it's a new conversation
+                if get_chat_title(conv_id) == "Untitled Conversation":
+                    title = generate_conversation_title(message, image_markdown, model_name)
+                    update_conversation_title(conv_id, title)
                 
                 yield history, "", get_chat_title(conv_id), format_conversation_list()
+                
             except Exception as e:
                 error_msg = f"Image generation failed: {str(e)}"
                 print(error_msg)
@@ -3919,7 +4019,8 @@ def submit_message(message, history, conv_id, model_name):
                 save_message(conv_id, model_name, "user", message)
                 save_message(conv_id, model_name, "assistant", error_msg)
                 
-                yield history, "", get_chat_title(conv_id), format_conversation_list()
+                yield history, "", get_chat_title(conv_id), format_conversation_list()\
+                
         
     except Exception as e:
         print(f"Error submitting message: {e}")
@@ -3986,7 +4087,7 @@ gr.HTML(f"""
             align-items: center;
             gap: 10px;
             padding: 8px 12px !important;
-            margin-top: -5px !important;  /* Pull the button up slightly */
+            margin-top: 4px !important;  /* Reduced spacing */
         }}
         #new_chat_btn img {{
             width: 24px;
@@ -4006,7 +4107,7 @@ gr.HTML(f"""
             margin-bottom: 0 !important;  /* Remove bottom margin */
         }}
         #manage_bots_btn {{
-            margin-top: -10px !important;  /* Pull the button up more */
+            margin-top: 4px !important;  /* Increased spacing */
             padding: 6px 10px !important;  /* Reduce button padding */
         }}
     </style>
