@@ -46,7 +46,7 @@ pkill -f "python.*app.py" > /dev/null 2>&1
 sleep 2
 
 # Start Ollama
-start_service "Ollama" "ollama serve > logs/ollama.log 2>&1" "ollama serve"
+#start_service "Ollama" "ollama serve > logs/ollama.log 2>&1" "ollama serve"
 
 # Get the directory where the script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -54,6 +54,24 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 # Start ComfyUI server
 cd "$SCRIPT_DIR/ComfyUI"
 start_service "ComfyUI" "python main.py > ../logs/comfyui.log 2>&1" "python.*main.py"
+# Download SDXL model if it doesn't exist
+SDXL_MODEL_PATH="$SCRIPT_DIR/ComfyUI/models/checkpoints/sdXL_v10.safetensors"
+if [ ! -f "$SDXL_MODEL_PATH" ]; then
+    log "Downloading SDXL model..." "$YELLOW"
+    mkdir -p "$(dirname "$SDXL_MODEL_PATH")"
+    TEMP_FILE="$(mktemp)"
+    wget -O "$TEMP_FILE" "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
+    if [ $? -eq 0 ]; then
+        mv "$TEMP_FILE" "$SDXL_MODEL_PATH"
+        log "SDXL model downloaded and renamed successfully"
+    else
+        log "Failed to download SDXL model" "$RED"
+        rm -f "$TEMP_FILE"
+        exit 1
+    fi
+else
+    log "SDXL model already exists"
+fi
 
 # Start MIDAS
 cd "$SCRIPT_DIR"

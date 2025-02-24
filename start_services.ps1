@@ -10,12 +10,12 @@ if ($comfyUIInstance -or $midasInstance) {
 }
 
 # Check if Ollama is running
-$ollamaProcess = Get-Process -Name "ollama" -ErrorAction SilentlyContinue
-if (-not $ollamaProcess) {
-    Write-Host "Ollama is not running. Starting Ollama..."
-    Start-Process -FilePath "ollama" -WindowStyle Hidden
-    Start-Sleep -Seconds 5
-}
+#$ollamaProcess = Get-Process -Name "ollama" -ErrorAction SilentlyContinue
+#if (-not $ollamaProcess) {
+#    Write-Host "Ollama is not running. Starting Ollama..."
+#    Start-Process -FilePath "ollama" -WindowStyle Hidden
+#    Start-Sleep -Seconds 5
+#}
 
 # Define paths for virtual environments and project directories
 $comfyui_venv = "C:\AIapps\ComfyUI_venv\Scripts\Activate.ps1"
