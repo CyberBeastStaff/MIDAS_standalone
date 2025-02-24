@@ -2688,7 +2688,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             # Add Xeno logo at the top
             gr.HTML("""
                 <div class="xeno-logo-container">
-                    <img src="xeno.png" alt="Xeno Logo" class="xeno-logo">
+                    <img src="gradio_api/file=xeno.png" alt="Xeno Logo" class="xeno-logo">
                 </div>
             """)
             # Manage Bots button
