@@ -73,6 +73,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             conversation_id INTEGER,
+            model TEXT,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -558,7 +559,7 @@ Please answer the user's question:"""
         updated_history = chat_history + [(message, error_msg)]
         yield "", updated_history, conv_id
 
-def save_message(conv_id, model, role, content):
+def save_message(conv_id, model, role, content, full_history=None):
     """
     Save a message to the conversation database
     
@@ -567,6 +568,7 @@ def save_message(conv_id, model, role, content):
         model (str): Model used
         role (str): Role of the message (user/assistant)
         content (str): Message content
+        full_history (list): Full conversation history
     """
     try:
         conn = sqlite3.connect('conversations.db')
@@ -584,12 +586,25 @@ def save_message(conv_id, model, role, content):
             )
         ''')
         
-        # Insert the message
-        cursor.execute('''
-            INSERT INTO messages 
-            (conversation_id, model, role, content) 
-            VALUES (?, ?, ?, ?)
-        ''', (conv_id, model, role, content))
+        if full_history:
+            # Remove only the last two messages instead of clearing all
+            cursor.execute('''
+                DELETE FROM messages
+                WHERE id IN (
+                    SELECT id
+                    FROM messages
+                    WHERE conversation_id = ?
+                    ORDER BY id DESC
+                    LIMIT 2
+                )
+            ''', (conv_id,))
+        else:
+            # Insert the message
+            cursor.execute('''
+                INSERT INTO messages 
+                (conversation_id, model, role, content) 
+                VALUES (?, ?, ?, ?)
+            ''', (conv_id, model, role, content))
         
         conn.commit()
     except Exception as e:
@@ -2762,7 +2777,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             with gr.Row():
                 chat_title = gr.Textbox(
                     label="Conversation", 
-                    interactive=True,  # Make non-editable by default
+                    interactive=False,  # Make non-editable by default
                     show_label=False,
                     container=False,
                     elem_id="chat_title",
@@ -2855,23 +2870,57 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                                     label="Add Attachment",
                                     size="sm",
                                     elem_id="file_upload_button",
-                                    elem_classes=["round-button", "image-button"]
+                                    elem_classes=["round-button", "image-button", "tooltip"]
                                 )
                                 submit_btn = gr.Button(
                                     "",  # Empty text since we'll use image
                                     variant="primary",
                                     size="sm",
                                     elem_id="send_button",
-                                    elem_classes=["round-button", "image-button"]
+                                    elem_classes=["round-button", "image-button", "tooltip"]
                                 )
                                 stop_btn = gr.Button(
                                     "",  # Empty text since we'll use image
                                     variant="stop",
                                     size="sm",
                                     elem_id="stop_button",
-                                    elem_classes=["round-button", "image-button"],
+                                    elem_classes=["round-button", "image-button", "tooltip"],
                                     visible=False
                                 )
+                                undo_btn = gr.Button(
+                                    "",  # Empty text since we'll use image
+                                    variant="secondary",
+                                    size="sm",
+                                    elem_id="undo_button",
+                                    elem_classes=["round-button", "image-button", "tooltip"]
+                                )
+                    
+                    gr.HTML("""
+                        <style>
+                            .tooltip::before {
+                                content: attr(data-tooltip);
+                                position: absolute;
+                                bottom: 100%;
+                                left: 50%;
+                                transform: translateX(-50%);
+                                padding: 5px;
+                                background-color: #333;
+                                color: white;
+                                border-radius: 4px;
+                                font-size: 12px;
+                                white-space: nowrap;
+                                opacity: 0;
+                                transition: opacity 0.3s;
+                            }
+                            .tooltip:hover::before {
+                                opacity: 1;
+                            }
+                            #file_upload_button::before { content: "Add Attachment"; }
+                            #send_button::before { content: "Send Message"; }
+                            #stop_button::before { content: "Stop Generation"; }
+                            #undo_button::before { content: "Undo Last Message"; }
+                        </style>
+                    """)
             
             # Upload status (hidden by default)
             upload_status = gr.Markdown(visible=False)
@@ -2880,6 +2929,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             file_upload_base64 = base64.b64encode(open("ui-assets/file-upload.png", "rb").read()).decode('utf-8')
             send_base64 = base64.b64encode(open("ui-assets/send.png", "rb").read()).decode('utf-8')
             stop_base64 = base64.b64encode(open("ui-assets/stop.png", "rb").read()).decode('utf-8')
+            undo_base64 = base64.b64encode(open("ui-assets/undo.png", "rb").read()).decode('utf-8')
             gr.HTML(f"""
                 <style>
                     /* Round buttons */
@@ -2915,6 +2965,10 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                     
                     #stop_button {{
                         background-image: url('data:image/png;base64,{stop_base64}') !important;
+                    }}
+                    
+                    #undo_button {{
+                        background-image: url('data:image/png;base64,{undo_base64}') !important;
                     }}
                     
                     /* Button row styling */
@@ -3395,6 +3449,22 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         update_conversation_model,
         inputs=[model_dropdown, current_conversation],
         outputs=[model_dropdown]
+    )
+
+    # Add undo button click event
+    def undo(chat_history, conv_id, model_name):
+        if len(chat_history) >= 2:
+            # Create a copy of the chat history without the last two messages
+            new_history = chat_history.copy()
+            del new_history[-2:]  # Remove last two messages
+            save_message(conv_id, model_name, "assistant", "", full_history=new_history)
+            return new_history
+        return chat_history
+
+    undo_btn.click(
+        undo,
+        inputs=[chatbot, current_conversation, model_dropdown],
+        outputs=[chatbot]
     )
 
     # Add footer
@@ -4087,7 +4157,7 @@ gr.HTML(f"""
             align-items: center;
             gap: 10px;
             padding: 8px 12px !important;
-            margin-top: 4px !important;  /* Reduced spacing */
+            margin-top: 10px !important;  /* Increased spacing */
         }}
         #new_chat_btn img {{
             width: 24px;
