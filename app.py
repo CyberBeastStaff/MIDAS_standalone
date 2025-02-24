@@ -29,7 +29,7 @@ app = Flask(__name__)
 DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Answer questions accurately and concisely."""
 
 # Configure Ollama client
-ollama_client = ollama.Client(host='http://localhost:11434')
+ollama_client = ollama.Client(host='http://127.0.0.1:11434')
 
 # Database setup
 def migrate_database():
@@ -268,7 +268,7 @@ def get_available_models():
     try:
         # Get models using ollama list command
         models = []
-        response = requests.get('http://localhost:11434/api/tags')
+        response = requests.get('http://127.0.0.1:11434/api/tags')
         if response.status_code == 200:
             data = response.json()
             if 'models' in data:
@@ -338,7 +338,7 @@ def get_available_ollama_models():
         list: List of dictionaries containing model details
     """
     try:
-        response = requests.get('http://localhost:11434/api/tags')
+        response = requests.get('http://127.0.0.1:11434/api/tags')
         if response.status_code == 200:
             models = response.json().get('models', [])
             
@@ -2688,7 +2688,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             # Add Xeno logo at the top
             gr.HTML("""
                 <div class="xeno-logo-container">
-                    <img src="gradio_api/file=xeno.png" alt="Xeno Logo" class="xeno-logo">
+                    <img src="xeno.png" alt="Xeno Logo" class="xeno-logo">
                 </div>
             """)
             # Manage Bots button
