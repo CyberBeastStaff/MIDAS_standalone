@@ -6,7 +6,7 @@ sudo yum install -y git python3 python3-pip curl wget
 
 # Install Ollama
 echo "Installing Ollama..."
-curl -sSL https://ollama.com/download.sh | sh
+curl -fsSL https://ollama.com/install.sh | sh
 
 # Pull required models from Ollama
 echo "Pulling required models from Ollama..."
