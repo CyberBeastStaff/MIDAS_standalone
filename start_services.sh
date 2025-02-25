@@ -53,7 +53,14 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 # Start ComfyUI server
 cd "$SCRIPT_DIR/ComfyUI"
-start_service "ComfyUI" "python main.py > ../logs/comfyui.log 2>&1" "python.*main.py"
+if [ -d "venv" ]; then
+    source venv/bin/activate
+    start_service "ComfyUI" "python main.py > ../logs/comfyui.log 2>&1" "python.*main.py"
+    deactivate
+else
+    log "ComfyUI virtual environment not found" "$RED"
+    exit 1
+fi
 # Download SDXL model if it doesn't exist
 SDXL_MODEL_PATH="$SCRIPT_DIR/ComfyUI/models/checkpoints/sdXL_v10.safetensors"
 if [ ! -f "$SDXL_MODEL_PATH" ]; then
