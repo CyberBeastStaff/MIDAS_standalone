@@ -2685,7 +2685,14 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Image("xeno.png", label=None, show_label=False, container=False, height=150, elem_classes=["xeno-logo-container", "xeno-logo"], show_download_button=False, show_fullscreen_button=False)
+            gr.Image("xeno.png", 
+            label=None, 
+            show_label=False, 
+            container=False, 
+            height=150, 
+            elem_classes=["xeno-logo-container", "xeno-logo"], 
+            show_download_button=False, 
+            show_fullscreen_button=False)
             # Manage Bots button
             gr.HTML(f"""
                 <style>
