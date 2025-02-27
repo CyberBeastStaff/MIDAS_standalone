@@ -1,6 +1,6 @@
 # Core Dependencies
-gradio==5.18.0
 requests==2.32.3
+gradio==5.18.0
 sqlalchemy==2.0.29
 fastapi==0.115.8
 uvicorn==0.27.1
@@ -17,7 +17,11 @@ pypdf==4.0.1
 docx2txt==0.8
 
 # Machine Learning & Image Generation
-torch>=2.2.0
+torch==2.2.0+cu121
+torchvision==0.17.0+cu121
+torchaudio==2.2.0+cu121
+torchsde>=0.2.6
+--extra-index-url https://download.pytorch.org/whl/cu121
 numpy>=1.26.0
 pillow>=10.0.0
 einops>=0.7.0
@@ -36,7 +40,7 @@ pandas>=2.2.0
 flask>=3.0.0
 ollama>=0.1.6
 python-dotenv>=1.0.0
-torchaudio>=2.2.0
-torchvision>=0.17.0
-torchsde>=0.2.6
 tokenizers>=0.13.3
+PyQt6>=6.6.0
+PyQt6-WebEngine>=6.6.0
+requests==2.32.3

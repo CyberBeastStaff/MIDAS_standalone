@@ -22,6 +22,7 @@ wheels/
 MANIFEST
 
 # Virtual Environment
+venvs/
 venv/
 env/
 .env/
@@ -51,6 +52,13 @@ images/
 
 # Changelog (optional tracking)
 #CHANGELOG.md
+
+#Browser Build Files
+build/
+dist/
+pyinstaller
+midas_browser.spec
+midas_browser.exe
 
 # OS Generated Files
 .DS_Store
