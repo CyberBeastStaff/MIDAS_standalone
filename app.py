@@ -1063,7 +1063,7 @@ def load_conversation(conv_id):
                     has_generated_image = True
                     # Extract the image path and ensure it uses the correct format
                     import re
-                    match = re.search(r'!\[Generated Image\]\((file/)?(.+)\)', content)
+                    match = re.search(r'!\[Generated Image\]\((file/|gradio_api/file=)?(.+)\)', content)
                     if match:
                         image_path = match.group(2)
                         # Remove any 'file/' or 'gradio_api/file=' prefix if it exists
@@ -3162,13 +3162,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             ]
         )
         
-        # Connect the close button
-        close_dialog_btn = gr.Button("Close", variant="secondary")
-        close_dialog_btn.click(
-            fn=lambda: gr.update(visible=False),
-            outputs=[manage_bots_dialog]
-        )
-        
         download_model.click(
             fn=download_ollama_model,
             inputs=[download_model_input],
@@ -3186,6 +3179,13 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             base_model,          # Base model dropdown
             save_status          # Save status
         ]
+    )
+    
+    # Connect the close button
+    close_dialog_btn = gr.Button("Close", variant="secondary")
+    close_dialog_btn.click(
+        fn=lambda: (gr.update(visible=False), gr.update(visible=False)),
+        outputs=[manage_bots_dialog, close_dialog_btn]
     )
 
     # Event handlers
@@ -3501,15 +3501,21 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     # Refresh existing bots list after saving
     manage_bots_btn.click(
         fn=lambda: (
+            gr.update(visible=True),  # Dialog visibility
             load_existing_bots(),  # Existing bots list
             gr.update(choices=get_existing_bots() + ['New Bot'], value='New Bot'),  # Bot name dropdown
-            gr.update(choices=get_available_models(), value=get_default_model())  # Base model dropdown
+            gr.update(choices=get_available_models(), value=get_default_model()),  # Base model dropdown
+            "",  # Clear save status
+            gr.update(visible=True)  # Close button visibility
         ),
         inputs=None,
         outputs=[
-            existing_bots_df,  # Existing bots list
-            bot_name_dropdown,  # Bot name dropdown
-            base_model         # Base model dropdown
+            manage_bots_dialog,  # Dialog visibility
+            existing_bots_df,    # Existing bots list
+            bot_name_dropdown,   # Bot name dropdown
+            base_model,          # Base model dropdown
+            save_status,         # Save status
+            close_dialog_btn     # Close button visibility
         ]
     )
 

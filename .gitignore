@@ -60,6 +60,9 @@ pyinstaller
 midas_browser.spec
 midas_browser.exe
 
+#Installer Folder
+installer/
+
 # OS Generated Files
 .DS_Store
 Thumbs.db
