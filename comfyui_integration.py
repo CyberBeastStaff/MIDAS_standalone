@@ -268,7 +268,7 @@ class ComfyUIAPI:
             self.logger.error(traceback.format_exc())
             return None
 
-    def update_workflow_with_parameters(self, workflow, prompt, negative_prompt="", width=1024, height=1024, steps=30, cfg=7.0, quality=1.0, seed=None):
+    def update_workflow_with_parameters(self, workflow, prompt, negative_prompt="", width=1024, height=1024, steps=15, cfg=2.0, quality=1.0, seed=None):
         """
         Update a workflow with the specified parameters
         
@@ -343,7 +343,7 @@ class ComfyUIAPI:
             self.logger.error(f"Error updating workflow parameters: {str(e)}")
             return workflow  # Return original workflow if update fails
 
-    def get_sdxl_workflow(self, prompt, negative_prompt="", width=1024, height=1024, steps=30, cfg=7.0, quality=1.0, seed=None):
+    def get_sdxl_workflow(self, prompt, negative_prompt="", width=1024, height=1024, steps=15, cfg=7.0, quality=1.0, seed=None):
         """Get the SDXL workflow with the specified parameters."""
         # Generate random seed if none specified
         if seed is None:

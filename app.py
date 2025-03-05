@@ -13,6 +13,7 @@ import threading
 import atexit
 import base64
 import io
+import configparser
 
 import gradio as gr
 import ollama
@@ -21,6 +22,10 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Load configuration
+config = configparser.ConfigParser()
+config.read('config.ini')
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -260,7 +265,7 @@ def get_bot_configurations():
 
 def get_available_models():
     """
-    Get list of available models from Ollama
+    Get list of available models from Ollama or configuration file
     
     Returns:
         list: List of model names without version suffixes
@@ -275,9 +280,17 @@ def get_available_models():
                 # Extract base model names without version
                 models = [model['name'].split(':')[0] for model in data['models']]
         
-        # If no models found, use default list based on what's installed
+        # If no models found, try reading from configuration
         if not models:
-            models = ["phi3.5", "mistral", "llama3.1", "codellama"]
+            # Read default models from configuration or environment
+            default_models_str = os.environ.get('MIDAS_DEFAULT_MODELS', 
+                                                config.get('models', 'default_models', 
+                                                          fallback='["phi3.5", "mistral"]'))
+            try:
+                models = json.loads(default_models_str)
+            except (json.JSONDecodeError, TypeError):
+                # Fallback to a minimal set if parsing fails
+                models = ["phi3.5", "mistral"]
         
         # Remove duplicates and sort
         models = sorted(set(models))
@@ -286,8 +299,8 @@ def get_available_models():
         
     except Exception as e:
         print(f"Error getting models: {e}")
-        # Return default models if API fails
-        return ["phi3.5", "mistral", "llama3.1", "codellama"]
+        # Return minimal default models if everything fails
+        return ["phi3.5", "mistral"]
 
 def get_model_display_name(model_name):
     """
@@ -1163,7 +1176,7 @@ def get_conversation_details(conv_id):
                 'timestamp': timestamp
             })
         
-        # If we detected generated images but the model isn't SDXL or a workflow, 
+        # If we detected generated images but the model isn't SDXL or a workflow,
         # update it to SDXL (for backward compatibility)
         if has_generated_image and not (last_used_model == "SDXL" or last_used_model.startswith("Workflow: ")):
             last_used_model = "SDXL"
@@ -2368,25 +2381,29 @@ def get_available_workflows():
 
 def get_all_models_and_workflows():
     """
-    Get combined list of models and workflows for the model dropdown
+    Get combined list of models, bots, and workflows for the model dropdown
     
     Returns:
-        list: Combined list of models and workflows
+        list: Combined list of models, bots, and workflows
     """
+    # Get available Ollama models
     models = get_available_models()
     
     # Add SDXL as a special option
     if "SDXL" not in models:
         models.append("SDXL")
     
-    # Get available workflows and add them to the list
+    # Get bot names
+    bot_names = get_bot_names()
+    
+    # Get available workflows
     workflows = get_available_workflows()
     
     # Create a formatted list of workflow options
     workflow_options = [f"Workflow: {workflow}" for workflow in workflows]
     
-    # Combine models and workflows
-    return models + workflow_options
+    # Combine models, bots, and workflows
+    return models + bot_names + workflow_options
 
 @app.route('/generate-image', methods=['POST'])
 def generate_image():
@@ -3151,7 +3168,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             save_status          # Save status
         ]
     )
-    
+
     # Connect the close button
     close_dialog_btn = gr.Button("Close", variant="secondary")
     close_dialog_btn.click(

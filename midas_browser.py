@@ -10,10 +10,10 @@ import requests
 import base64
 import psutil
 
-# Load the xenospinner.png and splash.jpeg images as base64
-with open('xenospinner.png', 'rb') as spinner_file, open('splash.jpeg', 'rb') as splash_file:
-    encoded_spinner = base64.b64encode(spinner_file.read()).decode('utf-8')
-    encoded_splash = base64.b64encode(splash_file.read()).decode('utf-8')
+# Load the xenospinner.png and splash.jpeg images
+with open('xenospinner.png', 'rb') as spinner_file, open('splashnew.jpg', 'rb') as splash_file:
+    spinner_data = spinner_file.read()
+    splash_data = splash_file.read()
 
 LOADING_HTML = f'''
 <html>
@@ -24,7 +24,7 @@ LOADING_HTML = f'''
             50% {{ transform: translateY(-10px); }}
         }}
         body {{
-            background-image: url('data:image/jpeg;base64,{encoded_splash}');
+            background-image: url('data:image/jpeg;base64,{base64.b64encode(splash_data).decode("utf-8")}');
             background-size: cover;
             background-position: center;
             margin: 0;
@@ -82,7 +82,7 @@ LOADING_HTML = f'''
 </head>
 <body>
     <div class="content">
-        <img src="data:image/png;base64,{encoded_spinner}" class="spinner" alt="Loading...">
+        <img src="data:image/png;base64,{base64.b64encode(spinner_data).decode("utf-8")}" class="spinner" alt="Loading...">
         <div class="loading-text">Starting MIDAS services...</div>
     </div>
     <div class="footer">Developed by Xenovative.Ltd, 2025</div>
