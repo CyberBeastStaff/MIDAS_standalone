@@ -3148,19 +3148,85 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         print(f"Retrieved context for conversation {conv_id}")
         
         def parse_sdxl_commands(message):
-            """
-            Parse SDXL commands from the user's input message
+            """Parse SDXL commands from the message and return parameters and cleaned message."""
+            params = {
+                'width': 1024,
+                'height': 1024,
+                'negative_prompt': "",
+                'style': None,
+                'quality': 1.0,
+                'steps': 30,
+                'cfg': 7.0,
+                'seed': None  # None means use random seed
+            }
             
-            Args:
-                message (str): User's input message
+            # Define aspect ratio presets
+            aspect_ratios = {
+                'square': (1024, 1024),
+                'portrait': (832, 1216),
+                'landscape': (1216, 832),
+                'wide': (1344, 768),
+                'tall': (768, 1344)
+            }
             
-            Returns:
-                tuple: Dictionary of SDXL commands and cleaned prompt
-            """
-            sdxl_params = {}
-            clean_prompt = message
-            return sdxl_params, clean_prompt
-
+            # Define style presets
+            style_presets = {
+                'photo': "detailed photograph, 4k, high quality, photorealistic",
+                'anime': "anime style, high quality, detailed, vibrant colors",
+                'painting': "digital painting, detailed brushwork, artistic, high quality",
+                'sketch': "pencil sketch, detailed linework, artistic",
+                '3d': "3D render, octane render, high quality, detailed lighting",
+                'cinematic': "cinematic shot, dramatic lighting, movie quality, 4k"
+            }
+            
+            # Split message into prompt and commands
+            parts = message.split('--')
+            clean_prompt = parts[0].strip()
+            
+            # Process each command
+            for part in parts[1:]:
+                if not part.strip():
+                    continue
+                
+                # Split command and value
+                cmd_parts = part.strip().split(None, 1)
+                if not cmd_parts:
+                    continue
+                
+                cmd = cmd_parts[0].lower()
+                value = cmd_parts[1] if len(cmd_parts) > 1 else ''
+                
+                if cmd == 'ar' and value in aspect_ratios:
+                    params['width'], params['height'] = aspect_ratios[value]
+                elif cmd == 'style' and value in style_presets:
+                    params['style'] = style_presets[value]
+                elif cmd == 'quality' and value:
+                    try:
+                        params['quality'] = float(value)
+                        params['quality'] = max(0.1, min(2.0, params['quality']))
+                    except ValueError:
+                        pass
+                elif cmd == 'steps' and value:
+                    try:
+                        params['steps'] = int(value)
+                        params['steps'] = max(1, min(100, params['steps']))
+                    except ValueError:
+                        pass
+                elif cmd == 'cfg' and value:
+                    try:
+                        params['cfg'] = float(value)
+                        params['cfg'] = max(1.0, min(20.0, params['cfg']))
+                    except ValueError:
+                        pass
+                elif cmd == 'seed' and value:
+                    try:
+                        params['seed'] = int(value)
+                    except ValueError:
+                        pass
+                elif cmd == 'neg':
+                    params['negative_prompt'] = value
+    
+            return params, clean_prompt
 
         # Handle SDXL image generation
         if model_name == "SDXL":
