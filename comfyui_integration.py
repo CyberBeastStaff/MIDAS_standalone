@@ -9,6 +9,42 @@ from io import BytesIO
 import random
 import re
 import textwrap
+import glob
+
+def setup_logging(name):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
+
+def compress_prompt(prompt):
+    # Remove extra whitespace
+    prompt = re.sub(r'\s+', ' ', prompt).strip()
+    
+    # If prompt is short enough, return as-is
+    if len(prompt) <= 1024:
+        return prompt
+    
+    # Log original prompt length
+    logging.info(f"Original prompt length: {len(prompt)} characters")
+    
+    # Truncate to max length
+    prompt = prompt[:1024]
+    
+    # Split into words and keep most important ones
+    words = prompt.split()
+    if len(words) > 50:
+        # Keep first few words and last few words
+        compressed_words = words[:10] + words[-10:]
+        prompt = ' '.join(compressed_words)
+    
+    # Log compressed prompt
+    logging.info(f"Compressed prompt length: {len(prompt)} characters")
+    
+    return prompt
 
 class ComfyUIIntegrator:
     def __init__(self, server_url="http://127.0.0.1:8188"):
@@ -27,11 +63,7 @@ class ComfyUIIntegrator:
         os.environ['COMFY_BASE_DIR'] = comfyui_path
         
         # Setup logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        self.logger = logging.getLogger('ComfyUIIntegrator')
+        self.logger = setup_logging('ComfyUIIntegrator')
         
         # Initialize API client
         self.api_client = ComfyUIAPI(server_url)
@@ -43,43 +75,9 @@ class ComfyUIIntegrator:
         self.MAX_PROMPT_LENGTH = 1024  # characters
         self.MAX_WORDS = 50  # maximum number of words
     
-    def compress_prompt(self, prompt):
+    def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, negative_prompt: str = "", steps: int = 30, cfg: float = 7.0, quality: float = 1.0, seed=None, timeout=600, workflow_name=None) -> Image.Image:
         """
-        Compress a long prompt to improve generation speed
-        
-        Strategies:
-        1. Remove extra whitespace
-        2. Truncate to max length
-        3. Reduce to most important words
-        """
-        # Remove extra whitespace
-        prompt = re.sub(r'\s+', ' ', prompt).strip()
-        
-        # If prompt is short enough, return as-is
-        if len(prompt) <= self.MAX_PROMPT_LENGTH:
-            return prompt
-        
-        # Log original prompt length
-        self.logger.info(f"Original prompt length: {len(prompt)} characters")
-        
-        # Truncate to max length
-        prompt = prompt[:self.MAX_PROMPT_LENGTH]
-        
-        # Split into words and keep most important ones
-        words = prompt.split()
-        if len(words) > self.MAX_WORDS:
-            # Keep first few words and last few words
-            compressed_words = words[:10] + words[-10:]
-            prompt = ' '.join(compressed_words)
-        
-        # Log compressed prompt
-        self.logger.info(f"Compressed prompt length: {len(prompt)} characters")
-        
-        return prompt
-
-    def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, negative_prompt: str = "", steps: int = 30, cfg: float = 7.0, quality: float = 1.0, seed=None, timeout=600) -> Image.Image:
-        """
-        Generate an image using ComfyUI's SDXL workflow
+        Generate an image using ComfyUI's workflow
         
         Args:
             prompt (str): Text prompt for image generation
@@ -91,14 +89,15 @@ class ComfyUIIntegrator:
             quality (float): Quality/denoise strength
             seed (int, optional): Seed for generation. If None, a random seed will be used.
             timeout (int, optional): Maximum time to wait for image generation in seconds. Default is 600 (10 minutes).
+            workflow_name (str, optional): Name of the workflow to use. If None, the default SDXL workflow will be used.
             
         Returns:
             PIL.Image: Generated image
         """
         try:
             # Compress the prompt
-            compressed_prompt = self.compress_prompt(prompt)
-            compressed_negative_prompt = self.compress_prompt(negative_prompt) if negative_prompt else ""
+            compressed_prompt = compress_prompt(prompt)
+            compressed_negative_prompt = compress_prompt(negative_prompt) if negative_prompt else ""
             
             self.logger.info(f"Generating image with prompt: {prompt}")
             return self.api_client.generate_image(
@@ -110,7 +109,8 @@ class ComfyUIIntegrator:
                 cfg=cfg, 
                 quality=quality,
                 seed=seed,
-                timeout=timeout
+                timeout=timeout,
+                workflow_name=workflow_name
             )
         except Exception as e:
             self.logger.error(f"Image generation failed: {str(e)}")
@@ -121,13 +121,10 @@ class ComfyUIAPI:
         self.server_url = server_url
         self.session = requests.Session()
         self.output_dir = os.path.join(os.path.dirname(__file__), "ComfyUI", "output")
+        self.workflows_dir = os.path.join(os.path.dirname(__file__), "workflows")
         
         # Configure logging with DEBUG level
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        self.logger = logging.getLogger("ComfyUIAPI")
+        self.logger = setup_logging('ComfyUIAPI')
         
         # Add a file handler to capture detailed logs
         log_file = os.path.join(os.path.dirname(__file__), "comfyui_api.log")
@@ -141,51 +138,210 @@ class ComfyUIAPI:
         logging.getLogger("urllib3").setLevel(logging.WARNING)
         logging.getLogger("requests").setLevel(logging.WARNING)
 
-        # Add max prompt length
-        self.MAX_PROMPT_LENGTH = 1024  # characters
-        self.MAX_WORDS = 50  # maximum number of words
-
-    def compress_prompt(self, prompt):
+    def get_available_workflows(self):
         """
-        Compress a long prompt to improve generation speed
+        Get a list of available workflow names from the workflows directory
         
-        Strategies:
-        1. Remove extra whitespace
-        2. Truncate to max length
-        3. Reduce to most important words
+        Returns:
+            list: List of workflow names without file extensions
         """
-        # Remove extra whitespace
-        prompt = re.sub(r'\s+', ' ', prompt).strip()
+        try:
+            # Ensure workflows directory exists
+            if not os.path.exists(self.workflows_dir):
+                os.makedirs(self.workflows_dir, exist_ok=True)
+                self.logger.info(f"Created workflows directory at {self.workflows_dir}")
+                return []
+            
+            # Get all JSON files in the workflows directory
+            workflow_files = glob.glob(os.path.join(self.workflows_dir, "*.json"))
+            
+            # Extract workflow names without file extensions
+            workflow_names = [os.path.splitext(os.path.basename(f))[0] for f in workflow_files]
+            
+            self.logger.info(f"Found {len(workflow_names)} workflows: {', '.join(workflow_names)}")
+            return workflow_names
         
-        # If prompt is short enough, return as-is
-        if len(prompt) <= self.MAX_PROMPT_LENGTH:
-            return prompt
-        
-        # Log original prompt length
-        self.logger.info(f"Original prompt length: {len(prompt)} characters")
-        
-        # Truncate to max length
-        prompt = prompt[:self.MAX_PROMPT_LENGTH]
-        
-        # Split into words and keep most important ones
-        words = prompt.split()
-        if len(words) > self.MAX_WORDS:
-            # Keep first few words and last few words
-            compressed_words = words[:10] + words[-10:]
-            prompt = ' '.join(compressed_words)
-        
-        # Log compressed prompt
-        self.logger.info(f"Compressed prompt length: {len(prompt)} characters")
-        
-        return prompt
+        except Exception as e:
+            self.logger.error(f"Error getting available workflows: {str(e)}")
+            return []
 
-    def setup_logging(self):
-        self.logger = logging.getLogger("ComfyUIAPI")
-        self.logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
+    def load_workflow(self, workflow_name):
+        """
+        Load a workflow from the workflows directory
+        
+        Args:
+            workflow_name (str): Name of the workflow file without extension
+            
+        Returns:
+            dict: Workflow JSON data or None if not found
+        """
+        try:
+            # Ensure workflows directory exists
+            if not os.path.exists(self.workflows_dir):
+                self.logger.error(f"Workflows directory does not exist: {self.workflows_dir}")
+                return None
+            
+            # Normalize workflow name
+            if workflow_name.startswith("Workflow: "):
+                workflow_name = workflow_name[len("Workflow: "):]
+            
+            # Detailed logging of workflow loading attempt
+            self.logger.info("=" * 50)
+            self.logger.info(f"ATTEMPTING TO LOAD WORKFLOW: {workflow_name}")
+            self.logger.info("=" * 50)
+            
+            # List all files in the workflows directory
+            try:
+                dir_contents = os.listdir(self.workflows_dir)
+                self.logger.info(f"Contents of workflows directory: {dir_contents}")
+            except Exception as dir_err:
+                self.logger.error(f"Error listing workflows directory: {dir_err}")
+            
+            # Find all JSON workflow files
+            available_workflows = glob.glob(os.path.join(self.workflows_dir, "*.json"))
+            self.logger.info(f"All available workflow files: {available_workflows}")
+            
+            # Try multiple variations of the workflow name
+            workflow_variations = [
+                workflow_name,  # Original name
+                workflow_name.replace(" ", "_"),  # Replace spaces with underscores
+                workflow_name.replace(" ", ""),  # Remove spaces
+                workflow_name.lower(),  # Lowercase
+                workflow_name.replace(" ", "_").lower(),  # Lowercase with underscores
+                workflow_name.replace(" ", "").lower(),  # Lowercase without spaces
+            ]
+            
+            # Find the first matching workflow file
+            matching_workflows = []
+            for variation in workflow_variations:
+                matching_workflows = [
+                    f for f in available_workflows 
+                    if os.path.splitext(os.path.basename(f))[0].lower() == variation.lower()
+                ]
+                if matching_workflows:
+                    break
+            
+            # If no match found, log error and return None
+            if not matching_workflows:
+                self.logger.error(f"No workflow found matching: {workflow_name}")
+                
+                # Print out potential close matches
+                def find_close_matches(name, options):
+                    import difflib
+                    return difflib.get_close_matches(name, options, n=3, cutoff=0.6)
+                
+                close_matches = find_close_matches(workflow_name, 
+                    [os.path.splitext(os.path.basename(f))[0] for f in available_workflows])
+                
+                if close_matches:
+                    self.logger.info(f"Possible close matches: {close_matches}")
+                
+                return None
+            
+            # Use the first matching workflow
+            workflow_path = matching_workflows[0]
+            
+            # Detailed logging of workflow path
+            self.logger.info(f"Found matching workflow: {workflow_path}")
+            
+            # Read and parse the workflow file
+            try:
+                with open(workflow_path, 'r') as f:
+                    workflow_data = json.load(f)
+                
+                # Detailed logging of workflow data
+                self.logger.info(f"Successfully loaded workflow from: {workflow_path}")
+                self.logger.debug(f"Workflow Structure: {json.dumps(workflow_data, indent=2)}")
+                
+                return workflow_data
+            
+            except json.JSONDecodeError as json_err:
+                self.logger.error(f"JSON parsing error in workflow file {workflow_path}: {json_err}")
+                return None
+            except IOError as io_err:
+                self.logger.error(f"IO error reading workflow file {workflow_path}: {io_err}")
+                return None
+        
+        except Exception as e:
+            self.logger.error(f"Unexpected error loading workflow {workflow_name}: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return None
+
+    def update_workflow_with_parameters(self, workflow, prompt, negative_prompt="", width=1024, height=1024, steps=30, cfg=7.0, quality=1.0, seed=None):
+        """
+        Update a workflow with the specified parameters
+        
+        Args:
+            workflow (dict): Workflow data
+            prompt (str): Text prompt
+            negative_prompt (str): Negative prompt
+            width (int): Image width
+            height (int): Image height
+            steps (int): Number of sampling steps
+            cfg (float): Classifier free guidance scale
+            quality (float): Quality/denoise strength
+            seed (int): Seed for generation
+            
+        Returns:
+            dict: Updated workflow
+        """
+        try:
+            # Generate random seed if none specified
+            if seed is None:
+                seed = random.randint(0, 2**32 - 1)
+                
+            self.logger.info(f"Using seed: {seed}")
+            
+            # Make a copy of the workflow to avoid modifying the original
+            updated_workflow = workflow.copy()
+            
+            # Find nodes by class type
+            for node_id, node in updated_workflow.items():
+                # Update positive prompt in CLIPTextEncode nodes
+                if node.get("class_type") == "CLIPTextEncode" and "_meta" in node and "title" in node["_meta"] and "Positive" in node["_meta"]["title"]:
+                    node["inputs"]["text"] = prompt
+                    self.logger.info(f"Updated positive prompt in node {node_id}")
+                
+                # Update negative prompt in CLIPTextEncode nodes
+                elif node.get("class_type") == "CLIPTextEncode" and "_meta" in node and "title" in node["_meta"] and "Negative" in node["_meta"]["title"]:
+                    node["inputs"]["text"] = negative_prompt
+                    self.logger.info(f"Updated negative prompt in node {node_id}")
+                
+                # Update seed in RandomNoise or similar nodes
+                elif node.get("class_type") in ["RandomNoise", "KSampler"] and "noise_seed" in node["inputs"]:
+                    node["inputs"]["noise_seed"] = seed
+                    self.logger.info(f"Updated seed in node {node_id}")
+                elif node.get("class_type") in ["KSampler"] and "seed" in node["inputs"]:
+                    node["inputs"]["seed"] = seed
+                    self.logger.info(f"Updated seed in node {node_id}")
+                
+                # Update steps in KSampler or similar nodes
+                elif "steps" in node.get("inputs", {}) and node.get("class_type") in ["KSampler", "BasicScheduler"]:
+                    node["inputs"]["steps"] = steps
+                    self.logger.info(f"Updated steps in node {node_id}")
+                
+                # Update cfg in KSampler nodes
+                elif "cfg" in node.get("inputs", {}) and node.get("class_type") in ["KSampler"]:
+                    node["inputs"]["cfg"] = cfg
+                    self.logger.info(f"Updated cfg in node {node_id}")
+                
+                # Update denoise/quality in KSampler or BasicScheduler nodes
+                elif "denoise" in node.get("inputs", {}) and node.get("class_type") in ["KSampler", "BasicScheduler"]:
+                    node["inputs"]["denoise"] = quality
+                    self.logger.info(f"Updated denoise in node {node_id}")
+                
+                # Update width and height in EmptyLatentImage or similar nodes
+                elif node.get("class_type") in ["EmptyLatentImage", "EmptySD3LatentImage"] and "width" in node["inputs"] and "height" in node["inputs"]:
+                    node["inputs"]["width"] = width
+                    node["inputs"]["height"] = height
+                    self.logger.info(f"Updated dimensions in node {node_id}")
+            
+            return updated_workflow
+        
+        except Exception as e:
+            self.logger.error(f"Error updating workflow parameters: {str(e)}")
+            return workflow  # Return original workflow if update fails
 
     def get_sdxl_workflow(self, prompt, negative_prompt="", width=1024, height=1024, steps=30, cfg=7.0, quality=1.0, seed=None):
         """Get the SDXL workflow with the specified parameters."""
@@ -387,9 +543,9 @@ class ComfyUIAPI:
         self.logger.error("Timeout waiting for image generation")
         return self.get_latest_image()
 
-    def generate_image(self, prompt, negative_prompt="", width=1024, height=1024, steps=30, cfg=7.0, quality=1.0, seed=None, timeout=600):
+    def generate_image(self, prompt: str, width: int = 1024, height: int = 1024, negative_prompt: str = "", steps: int = 30, cfg: float = 7.0, quality: float = 1.0, seed=None, timeout=600, workflow_name=None) -> Image.Image:
         """
-        Generate an image using the SDXL workflow
+        Generate an image using the specified workflow or default SDXL workflow
         
         Args:
             prompt (str): The prompt for image generation
@@ -401,26 +557,93 @@ class ComfyUIAPI:
             quality (float): Quality/denoise strength
             seed (int, optional): Seed for generation. If None, a random seed will be used.
             timeout (int, optional): Maximum time to wait for image generation in seconds. Default is 600 (10 minutes).
+            workflow_name (str, optional): Name of the workflow to use. If None, the default SDXL workflow will be used.
             
         Returns:
             PIL.Image: Generated image
         """
         try:
+            # Detailed logging of ALL input parameters
+            self.logger.info("=" * 50)
+            self.logger.info("GENERATE IMAGE CALLED")
+            self.logger.info("=" * 50)
+            self.logger.info(f"Full Input Parameters:")
+            self.logger.info(f"Prompt: {prompt}")
+            self.logger.info(f"Workflow Name: {workflow_name}")
+            self.logger.info(f"Width: {width}, Height: {height}")
+            self.logger.info(f"Negative Prompt: {negative_prompt}")
+            self.logger.info(f"Steps: {steps}")
+            self.logger.info(f"CFG: {cfg}")
+            self.logger.info(f"Quality: {quality}")
+            self.logger.info(f"Seed: {seed}")
+            
+            # Normalize workflow name
+            if workflow_name and workflow_name.startswith("Workflow: "):
+                workflow_name = workflow_name[len("Workflow: "):]
+            
+            # Detailed logging of workflow name normalization
+            self.logger.info(f"Normalized Workflow Name: {workflow_name}")
+            
             # Compress the prompt
-            compressed_prompt = self.compress_prompt(prompt)
-            compressed_negative_prompt = self.compress_prompt(negative_prompt) if negative_prompt else ""
+            compressed_prompt = compress_prompt(prompt)
+            compressed_negative_prompt = compress_prompt(negative_prompt) if negative_prompt else ""
             
             # Get the workflow with parameters
-            workflow = self.get_sdxl_workflow(
-                prompt=compressed_prompt,
-                negative_prompt=compressed_negative_prompt,
-                width=width,
-                height=height,
-                steps=steps,
-                cfg=cfg,
-                quality=quality,
-                seed=seed
-            )
+            if workflow_name:
+                # Log all available workflows
+                available_workflows = glob.glob(os.path.join(self.workflows_dir, "*.json"))
+                self.logger.info(f"All Available Workflows: {available_workflows}")
+                
+                # Log the full path of the workflow
+                workflow_path = os.path.join(self.workflows_dir, f"{workflow_name}.json")
+                self.logger.info(f"Attempting to load workflow from: {workflow_path}")
+                
+                # Detailed workflow loading
+                workflow_data = self.load_workflow(workflow_name)
+                if workflow_data:
+                    workflow = self.update_workflow_with_parameters(
+                        workflow_data,
+                        prompt=compressed_prompt,
+                        negative_prompt=compressed_negative_prompt,
+                        width=width,
+                        height=height,
+                        steps=steps,
+                        cfg=cfg,
+                        quality=quality,
+                        seed=seed
+                    )
+                    self.logger.info(f"Successfully loaded and updated custom workflow: {workflow_name}")
+                    
+                    # Log the structure of the updated workflow
+                    self.logger.debug(f"Updated Workflow Structure: {json.dumps(workflow, indent=2)}")
+                else:
+                    # Fallback to default SDXL workflow if custom workflow not found
+                    self.logger.warning(f"Custom workflow {workflow_name} not found, falling back to SDXL")
+                    workflow = self.get_sdxl_workflow(
+                        prompt=compressed_prompt,
+                        negative_prompt=compressed_negative_prompt,
+                        width=width,
+                        height=height,
+                        steps=steps,
+                        cfg=cfg,
+                        quality=quality,
+                        seed=seed
+                    )
+            else:
+                # Use default SDXL workflow
+                workflow = self.get_sdxl_workflow(
+                    prompt=compressed_prompt,
+                    negative_prompt=compressed_negative_prompt,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    cfg=cfg,
+                    quality=quality,
+                    seed=seed
+                )
+            
+            # Log the final workflow type
+            self.logger.info(f"Final Workflow Type: {'Custom' if workflow_name else 'SDXL'}")
             
             # Queue the prompt
             prompt_id = self.queue_prompt(workflow)
@@ -433,6 +656,8 @@ class ComfyUIAPI:
             
         except Exception as e:
             self.logger.error(f"Failed to generate image: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return None
 
     def download_image(self, image_data):

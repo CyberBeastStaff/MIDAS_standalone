@@ -785,12 +785,13 @@ def update_conversation_title(conv_id, title):
     """
     try:
         conn = sqlite3.connect('conversations.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE conversations
-            SET title = ?
-            WHERE id = ?
-        ''', (title, conv_id))
+        c = conn.cursor()
+        
+        # Update conversation title
+        c.execute('''UPDATE conversations 
+                     SET title = ? 
+                     WHERE id = ?''', (title.strip(), conv_id))
+        
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1162,8 +1163,9 @@ def get_conversation_details(conv_id):
                 'timestamp': timestamp
             })
         
-        # If we detected generated images, force the model to SDXL
-        if has_generated_image:
+        # If we detected generated images but the model isn't SDXL or a workflow, 
+        # update it to SDXL (for backward compatibility)
+        if has_generated_image and not (last_used_model == "SDXL" or last_used_model.startswith("Workflow: ")):
             last_used_model = "SDXL"
             # Update the model in the database
             c.execute('UPDATE conversations SET last_used_model = ? WHERE id = ?', ("SDXL", conv_id))
@@ -1260,8 +1262,9 @@ def update_conversation_model(model, conv_id):
                              OR content LIKE '%[Generated Image]%')''', (conv_id,))
             has_images = bool(c.fetchone())
             
-            # If this is an image generation conversation, force SDXL
-            if has_images:
+            # If this is an image generation conversation and the new model is not SDXL or a workflow,
+            # only then force SDXL (for backward compatibility)
+            if has_images and not (model == "SDXL" or model.startswith("Workflow: ")):
                 model = "SDXL"
             
             # Update the model in the database
@@ -2293,8 +2296,8 @@ comfyui_thread = threading.Thread(target=initialize_comfyui)
 comfyui_thread.daemon = True
 comfyui_thread.start()
 
-def generate_image_from_prompt(prompt, width, height):
-    """Generate an image using ComfyUI based on the given prompt"""
+def generate_image_from_prompt(prompt, width, height, model_name=None):
+    """Generate an image using ComfyUI based on the given prompt and selected workflow"""
     try:
         global comfyui
         if comfyui is None:
@@ -2308,14 +2311,26 @@ def generate_image_from_prompt(prompt, width, height):
             if comfyui is None:
                 raise gr.Error("ComfyUI is not initialized yet. Please wait a moment and try again.")
         
-        print(f"Generating image with prompt: {prompt}, size: {width}x{height}")
+        print(f"Generating image with prompt: {prompt}, size: {width}x{height}, model: {model_name}")
         
         # Convert width and height to integers
         width = int(width)
         height = int(height)
         
+        # Extract workflow name if it's a workflow
+        workflow_name = None
+        if model_name and model_name.startswith("Workflow: "):
+            workflow_name = model_name[len("Workflow: "):]
+        
         # Generate the image with a longer timeout
-        image = comfyui.generate_image(prompt, width=width, height=height, timeout=600)  # 10-minute timeout
+        image = comfyui.generate_image(
+            prompt, 
+            width=width, 
+            height=height, 
+            timeout=600,  # 10-minute timeout
+            workflow_name=workflow_name
+        )
+        
         if image is None:
             raise gr.Error("Failed to generate image. The process may have timed out or encountered an error.")
         
@@ -2330,6 +2345,48 @@ def generate_image_from_prompt(prompt, width, height):
         print("Full traceback:")
         print(traceback.format_exc())
         raise gr.Error(f"Image generation failed: {str(e)}")
+
+def get_available_workflows():
+    """
+    Get list of available workflows from the workflows directory
+    
+    Returns:
+        list: List of workflow names without file extensions
+    """
+    try:
+        global comfyui
+        if comfyui is None:
+            # Initialize ComfyUI if not already initialized
+            comfyui = initialize_comfyui()
+        
+        if comfyui and hasattr(comfyui, 'api_client'):
+            return comfyui.api_client.get_available_workflows()
+        return []
+    except Exception as e:
+        print(f"Error getting workflows: {e}")
+        return []
+
+def get_all_models_and_workflows():
+    """
+    Get combined list of models and workflows for the model dropdown
+    
+    Returns:
+        list: Combined list of models and workflows
+    """
+    models = get_available_models()
+    
+    # Add SDXL as a special option
+    if "SDXL" not in models:
+        models.append("SDXL")
+    
+    # Get available workflows and add them to the list
+    workflows = get_available_workflows()
+    
+    # Create a formatted list of workflow options
+    workflow_options = [f"Workflow: {workflow}" for workflow in workflows]
+    
+    # Combine models and workflows
+    return models + workflow_options
 
 @app.route('/generate-image', methods=['POST'])
 def generate_image():
@@ -2681,7 +2738,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             all_models = available_models + bot_names + ["SDXL"]  # Combine all models
             
             model_dropdown = gr.Dropdown(
-                choices=all_models,
+                choices=get_all_models_and_workflows(),
                 value=get_default_model(),  # Use the default model from settings
                 label="Model",
                 show_label=False,
@@ -3229,7 +3286,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             return params, clean_prompt
 
         # Handle SDXL image generation
-        if model_name == "SDXL":
+        if model_name == "SDXL" or model_name.startswith("Workflow: "):
             try:
                 # Parse SDXL commands
                 sdxl_params, clean_prompt = parse_sdxl_commands(message)
@@ -3248,11 +3305,12 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 yield history, "", get_chat_title(conv_id), format_conversation_list()
                 
                 image = comfyui.generate_image(
+                    workflow_name=model_name[len("Workflow: "):] if model_name.startswith("Workflow: ") else None,
                     prompt=clean_prompt,
                     width=sdxl_params.get('width', 1024),
                     height=sdxl_params.get('height', 1024),
                     negative_prompt=sdxl_params.get('negative_prompt', ""),
-                    steps=sdxl_params.get('steps', 30),
+                    steps=sdxl_params.get('steps', 15),
                     cfg=sdxl_params.get('cfg', 7.0),
                     quality=sdxl_params.get('quality', 1.0),
                     seed=sdxl_params.get('seed')
@@ -3271,37 +3329,16 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 # Save the image
                 image.save(image_filename)
                 
-                # Detailed logging and error handling
-                try:
-                    # Verify image was saved
-                    if not os.path.exists(image_filename):
-                        raise IOError(f"Failed to save image: {image_filename}")
-                    
-                    # Debug: Print absolute path and file details
-                    abs_image_path = os.path.abspath(image_filename)
-                    print(f"Generated Image Path: {abs_image_path}")
-                    print(f"Image File Size: {os.path.getsize(abs_image_path)} bytes")
-                    
-                    # Use gradio_api/file= for serving the image
-                    relative_path = os.path.relpath(abs_image_path, os.getcwd())
-                    image_markdown = f"![Generated Image](/gradio_api/file={relative_path})"
-                
-                except Exception as save_error:
-                    print(f"Image save error: {save_error}")
-                    traceback.print_exc()
-                    image_markdown = f"❌ Image generation failed: {str(save_error)}"
+                # Generate title using the default model
+                title = generate_conversation_title(message, "", get_default_model())
+                update_conversation_title(conv_id, title)
                 
                 # Update history with the actual image
-                history[-1] = (message, image_markdown)
+                history[-1] = (message, f"![Generated Image](/gradio_api/file={image_filename})")
                 
                 # Save messages to database
                 save_message(conv_id, model_name, "user", message)
-                save_message(conv_id, model_name, "assistant", image_markdown)
-                
-                # Generate title if it's a new conversation
-                if get_chat_title(conv_id) == "Untitled Conversation":
-                    title = generate_conversation_title(message, image_markdown, model_name)
-                    update_conversation_title(conv_id, title)
+                save_message(conv_id, model_name, "assistant", history[-1][1])
                 
                 yield history, "", get_chat_title(conv_id), format_conversation_list()
                 
@@ -3363,18 +3400,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 error_msg = f"Error generating response: {str(e)}"
                 print(error_msg)
                 print(traceback.format_exc())
-                
-                # Update history with error
-                if len(history) > 0 and history[-1][0] == message:
-                    history[-1] = (message, error_msg)
-                else:
-                    history.append((message, error_msg))
-                
-                # Save error messages
-                save_message(conv_id, model_name, "user", message)
+                history.append((message, error_msg))
                 save_message(conv_id, model_name, "assistant", error_msg)
-                
-                yield history, "", get_chat_title(conv_id), format_conversation_list()\
+                yield history, "", get_chat_title(conv_id), format_conversation_list()
                 
         
     # Add global variable to track generation state
