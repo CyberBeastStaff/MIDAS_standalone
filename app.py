@@ -1524,23 +1524,6 @@ def get_existing_bots_dataframe():
         print(f"Error retrieving bots DataFrame: {e}")
         return pd.DataFrame(columns=['Name', 'Base Model', 'System Prompt', 'Temperature', 'Max Tokens', 'Top P'])
 
-def load_existing_bots():
-    """
-    Load existing bot configurations for display
-    
-    Returns:
-        pandas.DataFrame: DataFrame of existing bot configurations
-    """
-    try:
-        bots = get_bot_configurations()
-        if not bots:
-            return pd.DataFrame(columns=['Name', 'Base Model', 'System Prompt', 'Temperature', 'Max Tokens', 'Top P'])
-        
-        return pd.DataFrame(bots)
-    except Exception as e:
-        print(f"Error loading existing bots: {e}")
-        return pd.DataFrame(columns=['Name', 'Base Model', 'System Prompt', 'Temperature', 'Max Tokens', 'Top P'])
-
 def get_existing_bots():
     """
     Retrieve list of existing bot names
@@ -1608,53 +1591,6 @@ def load_bot_configuration(bot_name):
     except Exception as e:
         print(f"Error loading bot configuration for {bot_name}: {e}")
         return None
-
-def handle_bot_selection(bot_name_dropdown):
-    """
-    Handle bot selection and load its configuration
-    
-    Args:
-        bot_name_dropdown (str): Selected bot name
-    
-    Returns:
-        tuple: Updated configuration components
-    """
-    # First, determine custom name input visibility
-    custom_name_input_visibility = gr.update(visible=bot_name_dropdown == 'New Bot')
-    
-    if bot_name_dropdown == 'New Bot':
-        # Reset all fields for a new bot
-        return (
-            custom_name_input_visibility,
-            gr.update(value=get_default_model()),
-            gr.update(value=''),
-            gr.update(value=0.7),
-            gr.update(value=4096),
-            gr.update(value=0.9)
-        )
-    
-    # Load existing bot configuration
-    bot_config = load_bot_configuration(bot_name_dropdown)
-    
-    if bot_config:
-        return (
-            custom_name_input_visibility,
-            gr.update(value=bot_config['base_model']),
-            gr.update(value=bot_config['system_prompt']),
-            gr.update(value=bot_config['temperature']),
-            gr.update(value=bot_config['max_tokens']),
-            gr.update(value=bot_config['top_p'])
-        )
-    
-    # Fallback if configuration not found
-    return (
-        custom_name_input_visibility,
-        gr.update(value=get_default_model()),
-        gr.update(value=''),
-        gr.update(value=0.7),
-        gr.update(value=4096),
-        gr.update(value=0.9)
-    )
 
 def delete_bot_configuration(bot_name_dropdown):
     """
@@ -2311,28 +2247,6 @@ def handle_bot_selection(bot_name):
             4096,                     # max_tokens
             0.9                       # top_p
         )
-
-def initialize_comfyui():
-    """Initialize ComfyUI and set up the global instance"""
-    try:
-        from comfyui_integration import ComfyUIIntegrator
-        global comfyui
-        
-        print("Starting ComfyUI initialization...")
-        comfyui = ComfyUIIntegrator()
-        print("ComfyUI initialized successfully")
-        return comfyui
-        
-    except ImportError as e:
-        print(f"Failed to import ComfyUI modules: {str(e)}")
-        print("Make sure all required packages are installed")
-        return None
-    except Exception as e:
-        print(f"Error initializing ComfyUI: {str(e)}")
-        import traceback
-        print("Full traceback:")
-        print(traceback.format_exc())
-        return None
 
 # Initialize global comfyui variable
 comfyui = None
@@ -3233,6 +3147,21 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         context = get_relevant_context(message, conv_id)
         print(f"Retrieved context for conversation {conv_id}")
         
+        def parse_sdxl_commands(message):
+            """
+            Parse SDXL commands from the user's input message
+            
+            Args:
+                message (str): User's input message
+            
+            Returns:
+                tuple: Dictionary of SDXL commands and cleaned prompt
+            """
+            sdxl_params = {}
+            clean_prompt = message
+            return sdxl_params, clean_prompt
+
+
         # Handle SDXL image generation
         if model_name == "SDXL":
             try:
@@ -3242,7 +3171,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 # Generate image using ComfyUI
                 global comfyui
                 if comfyui is None:
-                    comfyui = ComfyUIIntegrator()
+                    comfyui = initialize_comfyui()
                 
                 # Apply style if specified
                 if sdxl_params.get('style'):
@@ -3552,101 +3481,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         ]
     )
 
-    # Image generation handler
-    def generate_image_from_prompt(prompt, width, height):
-        try:
-            image = comfyui.generate_image(prompt, width=width, height=height)
-            return image
-        except Exception as e:
-            raise gr.Error(f'Image generation failed: {str(e)}')
-
-    # generate_image_btn.click(
-    #     fn=generate_image_from_prompt,
-    #     inputs=[image_prompt, image_width, image_height],
-    #     outputs=generated_image
-    # )
-
-def parse_sdxl_commands(message):
-    """Parse SDXL commands from the message and return parameters and cleaned message."""
-    params = {
-        'width': 1024,
-        'height': 1024,
-        'negative_prompt': "",
-        'style': None,
-        'quality': 1.0,
-        'steps': 30,
-        'cfg': 7.0,
-        'seed': None  # None means use random seed
-    }
-    
-    # Define aspect ratio presets
-    aspect_ratios = {
-        'square': (1024, 1024),
-        'portrait': (832, 1216),
-        'landscape': (1216, 832),
-        'wide': (1344, 768),
-        'tall': (768, 1344)
-    }
-    
-    # Define style presets
-    style_presets = {
-        'photo': "detailed photograph, 4k, high quality, photorealistic",
-        'anime': "anime style, high quality, detailed, vibrant colors",
-        'painting': "digital painting, detailed brushwork, artistic, high quality",
-        'sketch': "pencil sketch, detailed linework, artistic",
-        '3d': "3D render, octane render, high quality, detailed lighting",
-        'cinematic': "cinematic shot, dramatic lighting, movie quality, 4k"
-    }
-    
-    # Split message into prompt and commands
-    parts = message.split('--')
-    clean_prompt = parts[0].strip()
-    
-    # Process each command
-    for part in parts[1:]:
-        if not part.strip():
-            continue
-            
-        # Split command and value
-        cmd_parts = part.strip().split(None, 1)
-        if not cmd_parts:
-            continue
-            
-        cmd = cmd_parts[0].lower()
-        value = cmd_parts[1] if len(cmd_parts) > 1 else ''
-        
-        if cmd == 'ar' and value in aspect_ratios:
-            params['width'], params['height'] = aspect_ratios[value]
-        elif cmd == 'style' and value in style_presets:
-            params['style'] = style_presets[value]
-        elif cmd == 'quality' and value:
-            try:
-                params['quality'] = float(value)
-                params['quality'] = max(0.1, min(2.0, params['quality']))
-            except ValueError:
-                pass
-        elif cmd == 'steps' and value:
-            try:
-                params['steps'] = int(value)
-                params['steps'] = max(1, min(100, params['steps']))
-            except ValueError:
-                pass
-        elif cmd == 'cfg' and value:
-            try:
-                params['cfg'] = float(value)
-                params['cfg'] = max(1.0, min(20.0, params['cfg']))
-            except ValueError:
-                pass
-        elif cmd == 'seed' and value:
-            try:
-                params['seed'] = int(value)
-            except ValueError:
-                pass
-        elif cmd == 'neg':
-            params['negative_prompt'] = value
-    
-    return params, clean_prompt
-
 def remove_document(filename, conversation_id=None):
         """Remove a document from the RAG system
     
@@ -3783,329 +3617,6 @@ atexit.register(cleanup_temp_files)
 
 # Global dictionary to store temporary documents
 temp_documents = {}
-
-def handle_file_upload(file_obj, conversation_id=None):
-    """Handle file upload from Gradio interface
-    
-    Args:
-        file_obj: Gradio file object
-        conversation_id (int, optional): Current conversation ID
-    
-    Returns:
-        tuple: (status_message, document_name, overlay_visibility_state, conversation_id)
-    """
-    try:
-        print(f"\nHandling file upload for conversation ID: {conversation_id}")
-        
-        if file_obj is None:
-            print("No file object provided")
-            return "", "", False, conversation_id
-            
-        original_name = os.path.basename(file_obj)
-        print(f"Processing file: {original_name}")
-        
-        # Create temporary directory if it doesn't exist
-        temp_dir = os.path.join(os.getcwd(), 'temp_uploads')
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # Copy file to temporary location
-        file_ext = os.path.splitext(original_name)[1]
-        temp_filename = f"{str(uuid.uuid4())}{file_ext}"
-        
-        temp_path = os.path.join(temp_dir, temp_filename)
-        
-        shutil.copy2(file_obj, temp_path)
-        
-        # Create embeddings in temporary location
-        temp_embeddings_dir = os.path.join(temp_dir, f"embeddings_{temp_filename}")
-        
-        try:
-            # Load and chunk the document
-            if file_ext.lower() == '.pdf':
-                loader = PyPDFLoader(temp_path)
-            else:
-                loader = TextLoader(temp_path)
-                
-            documents = loader.load()
-            text_splitter = RecursiveCharacterTextSplitter()
-            chunks = text_splitter.split_documents(documents)
-            
-            # Create and persist embeddings
-            db = Chroma.from_documents(
-                documents=chunks,
-                embedding=HuggingFaceEmbeddings(),
-                persist_directory=temp_embeddings_dir
-            )
-            db.persist()
-            print("Vector store created and persisted")
-            
-            # Store document info in temporary dictionary
-            doc_info = {
-                'original_name': original_name,
-                'temp_path': temp_path,
-                'embedding_path': temp_embeddings_dir,
-                'file_type': file_ext,
-                'timestamp': datetime.now()
-            }
-            
-            # Use conversation ID as key if exists, otherwise use a temporary ID
-            storage_key = conversation_id if conversation_id else str(uuid.uuid4())
-            if storage_key not in temp_documents:
-                temp_documents[storage_key] = []
-            temp_documents[storage_key].append(doc_info)
-            
-            return f"Successfully processed {original_name}", f"**{original_name}**", True, conversation_id
-            
-        except Exception as e:
-            print(f"Error processing document: {e}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            if os.path.exists(temp_embeddings_dir):
-                shutil.rmtree(temp_embeddings_dir)
-            raise
-            
-    except Exception as e:
-        print(f"Error handling file upload: {e}")
-        traceback.print_exc()
-        return f"Error uploading file: {str(e)}", "", False, conversation_id
-
-def process_temp_documents(conversation_id):
-    """Process temporary documents and associate them with a conversation
-    
-    Args:
-        conversation_id (int): Conversation ID to associate documents with
-    """
-    if not conversation_id:
-        return
-        
-    try:
-        # Check for documents in temporary storage
-        docs = []
-        for key in list(temp_documents.keys()):
-            if key == conversation_id or not isinstance(key, int):
-                docs.extend(temp_documents[key])
-                del temp_documents[key]
-        
-        if not docs:
-            return
-            
-        # Save documents to database
-        conn = sqlite3.connect('conversations.db')
-        c = conn.cursor()
-        
-        for doc in docs:
-            # Move files to permanent location
-            uploads_dir = os.path.join(os.getcwd(), 'uploads')
-            os.makedirs(uploads_dir, exist_ok=True)
-            
-            permanent_filename = f"{str(uuid.uuid4())}{doc['file_type']}"
-            permanent_path = os.path.join(uploads_dir, permanent_filename)
-            permanent_embeddings_dir = os.path.join(uploads_dir, f"embeddings_{permanent_filename}")
-            
-            # Move files
-            shutil.move(doc['temp_path'], permanent_path)
-            shutil.move(doc['embedding_path'], permanent_embeddings_dir)
-            
-            # Save to database
-            c.execute('''INSERT INTO documents 
-                         (filename, original_name, file_type, embedding_path, conversation_id)
-                         VALUES (?, ?, ?, ?, ?)''', 
-                      (permanent_filename, doc['original_name'], doc['file_type'], os.path.join(permanent_embeddings_dir, 'index'), conversation_id))
-        
-        conn.commit()
-        conn.close()
-        
-    except Exception as e:
-        print(f"Error processing temporary documents: {e}")
-        traceback.print_exc()
-
-def submit_message(message, history, conv_id, model_name):
-    """Submit a message to the chat
-    
-    Args:
-        message (str): User's input message
-        history (list): Current conversation history
-        conv_id (str): Conversation ID
-        model_name (str): Selected model/mode
-    
-    Returns:
-        tuple: Updated outputs for Gradio interface
-    """
-    if not message:
-        return history, "", get_chat_title(conv_id), format_conversation_list()
-    
-    try:
-        # Create new conversation if needed
-        if not conv_id:
-            conv_id = create_conversation(message, model_name)
-            if not conv_id:
-                error_msg = "Failed to create new conversation"
-                history.append((message, error_msg))
-                return history, "", "Error", format_conversation_list()
-            print(f"Created new conversation with ID: {conv_id}")
-            
-            # Process any temporary documents
-            process_temp_documents(conv_id)
-        
-        # Get relevant context from documents
-        context = get_relevant_context(message, conv_id)
-        print(f"Retrieved context for conversation {conv_id}")
-        
-        # Handle SDXL image generation
-        if model_name == "SDXL":
-            try:
-                # Parse SDXL commands
-                sdxl_params, clean_prompt = parse_sdxl_commands(message)
-                
-                # Generate image using ComfyUI
-                global comfyui
-                if comfyui is None:
-                    comfyui = ComfyUIIntegrator()
-                
-                # Apply style if specified
-                if sdxl_params.get('style'):
-                    clean_prompt = f"{clean_prompt} {sdxl_params['style']}"
-                
-                # Add user message to history first
-                history.append((message, "Generating image..."))
-                yield history, "", get_chat_title(conv_id), format_conversation_list()
-                
-                image = comfyui.generate_image(
-                    prompt=clean_prompt,
-                    width=sdxl_params.get('width', 1024),
-                    height=sdxl_params.get('height', 1024),
-                    negative_prompt=sdxl_params.get('negative_prompt', ""),
-                    steps=sdxl_params.get('steps', 30),
-                    cfg=sdxl_params.get('cfg', 7.0),
-                    quality=sdxl_params.get('quality', 1.0),
-                    seed=sdxl_params.get('seed')
-                )
-                
-                # Ensure conversations directory exists
-                os.makedirs('conversations', exist_ok=True)
-                
-                # Define image filename using datetime
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                image_filename = f'conversations/{conv_id}/generated_image_{timestamp}.png'
-                
-                # Ensure the directory exists
-                os.makedirs(os.path.dirname(image_filename), exist_ok=True)
-                
-                # Save the image
-                image.save(image_filename)
-                
-                # Detailed logging and error handling
-                try:
-                    # Verify image was saved
-                    if not os.path.exists(image_filename):
-                        raise IOError(f"Failed to save image: {image_filename}")
-                    
-                    # Debug: Print absolute path and file details
-                    abs_image_path = os.path.abspath(image_filename)
-                    print(f"Generated Image Path: {abs_image_path}")
-                    print(f"Image File Size: {os.path.getsize(abs_image_path)} bytes")
-                    
-                    # Use gradio_api/file= for serving the image
-                    relative_path = os.path.relpath(abs_image_path, os.getcwd())
-                    image_markdown = f"![Generated Image](/gradio_api/file={relative_path})"
-                
-                except Exception as save_error:
-                    print(f"Image save error: {save_error}")
-                    traceback.print_exc()
-                    image_markdown = f"❌ Image generation failed: {str(save_error)}"
-                
-                # Update history with the actual image
-                history[-1] = (message, image_markdown)
-                
-                # Save messages to database
-                save_message(conv_id, model_name, "user", message)
-                save_message(conv_id, model_name, "assistant", image_markdown)
-                
-                # Generate title if it's a new conversation
-                if get_chat_title(conv_id) == "Untitled Conversation":
-                    title = generate_conversation_title(message, image_markdown, model_name)
-                    update_conversation_title(conv_id, title)
-                
-                yield history, "", get_chat_title(conv_id), format_conversation_list()
-                
-            except Exception as e:
-                error_msg = f"Image generation failed: {str(e)}"
-                print(error_msg)
-                
-                # Update history with error
-                if len(history) > 0 and history[-1][1] == "Generating image...":
-                    history[-1] = (message, error_msg)
-                else:
-                    history.append((message, error_msg))
-                
-                # Save error messages
-                save_message(conv_id, model_name, "user", message)
-                save_message(conv_id, model_name, "assistant", error_msg)
-                
-                yield history, "", get_chat_title(conv_id), format_conversation_list()
-        
-        # Default behavior for non-SDXL models
-        else:
-            try:
-                # Generate response using the model with context
-                response_generator = generate_response(message, model_name, history, conv_id, context=context)
-                
-                # Add user message to history
-                history.append((message, ""))
-                save_message(conv_id, model_name, "user", message)
-                
-                # Generate title if it's a new conversation
-                if get_chat_title(conv_id) == "Untitled Conversation":
-                    title = generate_conversation_title(message, "", model_name)
-                    update_conversation_title(conv_id, title)
-                
-                yield history, "", get_chat_title(conv_id), format_conversation_list()
-                
-                # Stream the response
-                full_response = ""
-                for response in response_generator:
-                    if response and isinstance(response, tuple):
-                        _, updated_history, current_conv_id = response
-                        # Update the response in history
-                        if len(updated_history) > 0:
-                            full_response = updated_history[-1][1]
-                            history[-1] = (message, full_response)
-                            yield history, "", get_chat_title(current_conv_id), format_conversation_list()
-                
-                # Save the final response
-                save_message(conv_id, model_name, "assistant", full_response)
-                
-                # Update title if still untitled
-                if get_chat_title(conv_id) == "Untitled Conversation":
-                    title = generate_conversation_title(message, full_response, model_name)
-                    update_conversation_title(conv_id, title)
-                
-                yield history, "", get_chat_title(conv_id), format_conversation_list()
-                
-            except Exception as e:
-                error_msg = f"Error generating response: {str(e)}"
-                print(error_msg)
-                print(traceback.format_exc())
-                
-                # Update history with error
-                if len(history) > 0 and history[-1][0] == message:
-                    history[-1] = (message, error_msg)
-                else:
-                    history.append((message, error_msg))
-                
-                # Save error messages
-                save_message(conv_id, model_name, "user", message)
-                save_message(conv_id, model_name, "assistant", error_msg)
-                
-                yield history, "", get_chat_title(conv_id), format_conversation_list()\
-                
-        
-    except Exception as e:
-        print(f"Error submitting message: {e}")
-        traceback.print_exc()
-        error_msg = "I apologize, but I encountered an error while processing your request."
-        history.append((message, error_msg))
-        yield history, "", get_chat_title(conv_id), format_conversation_list()
 
 gr.HTML(f"""
     <style>
