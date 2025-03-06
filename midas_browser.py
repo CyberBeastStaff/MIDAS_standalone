@@ -11,7 +11,7 @@ import base64
 import psutil
 
 # Load the xenospinner.png and splash.jpeg images
-with open('xenospinner.png', 'rb') as spinner_file, open('splashnew.jpg', 'rb') as splash_file:
+with open('xenospinner.png', 'rb') as spinner_file, open('splashnew2.jpg', 'rb') as splash_file:
     spinner_data = spinner_file.read()
     splash_data = splash_file.read()
 
@@ -22,6 +22,12 @@ LOADING_HTML = f'''
         @keyframes hover {{
             0%, 100% {{ transform: translateY(0); }}
             50% {{ transform: translateY(-10px); }}
+        }}
+        @keyframes zoom {{
+            0%, 100% {{ background-size: 100% 100%; }}
+            25% {{ background-size: 105% 105%; }}
+            50% {{ background-size: 110% 110%; }}
+            75% {{ background-size: 105% 105%; }}
         }}
         body {{
             background-image: url('data:image/jpeg;base64,{base64.b64encode(splash_data).decode("utf-8")}');
@@ -35,6 +41,7 @@ LOADING_HTML = f'''
             align-items: center;
             position: relative;
             overflow: hidden;
+            animation: zoom 20s ease-in-out infinite;
         }}
         body::before {{
             content: '';
@@ -83,7 +90,7 @@ LOADING_HTML = f'''
 <body>
     <div class="content">
         <img src="data:image/png;base64,{base64.b64encode(spinner_data).decode("utf-8")}" class="spinner" alt="Loading...">
-        <div class="loading-text">Starting MIDAS services...</div>
+        <div class="loading-text">Starting MIDAS 2.0...</div>
     </div>
     <div class="footer">Developed by Xenovative.Ltd, 2025</div>
 </body>
