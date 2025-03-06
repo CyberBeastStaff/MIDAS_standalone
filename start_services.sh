@@ -88,7 +88,7 @@ else
     log "ComfyUI virtual environment not found" "$RED"
     exit 1
 fi
-fi
+
 # Download SDXL model if it doesn't exist
 SDXL_MODEL_PATH="$SCRIPT_DIR/ComfyUI/models/checkpoints/sdXL_v10.safetensors"
 if [ ! -f "$SDXL_MODEL_PATH" ]; then
