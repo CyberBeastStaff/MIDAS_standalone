@@ -63,6 +63,17 @@ if not exist ComfyUI (
     echo [%date% %time%] ComfyUI download complete.
 )
 
+REM Set up MIDAS Python 3.11 virtual environment if not already set up
+if not exist venvs\midas_venv (
+    echo [%date% %time%] Setting up MIDAS virtual environment...
+    for /f "delims=" %%i in ('where python') do set PYTHON_PATH=%%i
+    "%PYTHON_PATH%" -m venv venvs\midas_venv
+    call venvs\midas_venv\Scripts\activate.bat
+    pip install -r requirements.txt
+    call venvs\midas_venv\Scripts\deactivate.bat
+    echo [%date% %time%] MIDAS virtual environment setup complete.
+)
+
 REM Set up virtual environments directory
 if not exist venvs mkdir venvs
 
@@ -70,7 +81,8 @@ REM Set up ComfyUI Python virtual environment if not already set up
 if not exist venvs\comfyui_venv (
     echo [%date% %time%] Setting up ComfyUI virtual environment...
     cd ComfyUI
-    python -m venv ..\venvs\comfyui_venv
+    for /f "delims=" %%i in ('where python') do set PYTHON_PATH=%%i
+    "%PYTHON_PATH%" -m venv ..\venvs\comfyui_venv
     call ..\venvs\comfyui_venv\Scripts\activate.bat
     pip install -r requirements.txt
     call ..\venvs\comfyui_venv\Scripts\deactivate.bat
@@ -83,16 +95,6 @@ if not exist ComfyUI\models\checkpoints\sdXL_v10.safetensors (
     echo [%date% %time%] Downloading SDXL model...
     curl -L https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors -o ComfyUI\models\checkpoints\sdXL_v10.safetensors
     echo [%date% %time%] SDXL model download complete.
-)
-
-REM Set up MIDAS Python 3.11 virtual environment if not already set up
-if not exist venvs\midas_venv (
-    echo [%date% %time%] Setting up MIDAS virtual environment...
-    "C:\Program Files\Python311\python.exe" -m venv venvs\midas_venv
-    call venvs\midas_venv\Scripts\activate.bat
-    pip install -r requirements.txt
-    call venvs\midas_venv\Scripts\deactivate.bat
-    echo [%date% %time%] MIDAS virtual environment setup complete.
 )
 
 echo [%date% %time%] Setup complete.
