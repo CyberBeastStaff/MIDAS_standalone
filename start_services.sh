@@ -51,6 +51,33 @@ sleep 2
 # Get the directory where the script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
+# Set up virtual environments directory
+if [ ! -d venvs ]; then
+    mkdir venvs
+fi
+
+# Set up MIDAS Python 3.11 virtual environment if not already set up
+if [ ! -d venvs/midas_venv ]; then
+    echo "Setting up MIDAS virtual environment..."
+    python3 -m venv venvs/midas_venv
+    source venvs/midas_venv/bin/activate
+    pip install -r requirements.txt
+    deactivate
+    echo "MIDAS virtual environment setup complete."
+fi
+
+# Set up ComfyUI Python virtual environment if not already set up
+if [ ! -d venvs/comfyui_venv ]; then
+    echo "Setting up ComfyUI virtual environment..."
+    cd ComfyUI
+    python3 -m venv ../venvs/comfyui_venv
+    source ../venvs/comfyui_venv/bin/activate
+    pip install -r requirements.txt
+    deactivate
+    cd ..
+    echo "ComfyUI virtual environment setup complete."
+fi
+
 # Start ComfyUI server
 cd "$SCRIPT_DIR/ComfyUI"
 if [ -d "venv" ]; then
@@ -82,8 +109,8 @@ fi
 
 # Start MIDAS
 cd "$SCRIPT_DIR"
-if [ -d "venv" ]; then
-    source venv/bin/activate
+if [ -d "venvs/midas_venv" ]; then
+    source venvs/midas_venv/bin/activate
     start_service "MIDAS" "python app.py > logs/midas.log 2>&1" "python.*app.py"
 else
     log "MIDAS virtual environment not found" "$RED"
