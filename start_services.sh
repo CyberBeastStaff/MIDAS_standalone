@@ -58,36 +58,37 @@ fi
 
 # Set up MIDAS Python 3.11 virtual environment if not already set up
 if [ ! -d venvs/midas_venv ]; then
-    echo "Setting up MIDAS virtual environment..."
-    python3 -m venv venvs/midas_venv
+    log "Setting up MIDAS virtual environment..." "$YELLOW"
+    python3.11 -m venv venvs/midas_venv
     source venvs/midas_venv/bin/activate
     pip install -r requirements.txt
     deactivate
-    echo "MIDAS virtual environment setup complete."
+    log "MIDAS virtual environment setup complete." "$GREEN"
 fi
 
 # Set up ComfyUI Python virtual environment if not already set up
 if [ ! -d venvs/comfyui_venv ]; then
-    echo "Setting up ComfyUI virtual environment..."
+    log "Setting up ComfyUI virtual environment..." "$YELLOW"
     cd ComfyUI
     python3 -m venv ../venvs/comfyui_venv
     source ../venvs/comfyui_venv/bin/activate
     pip install -r requirements.txt
     deactivate
     cd ..
-    echo "ComfyUI virtual environment setup complete."
+    log "ComfyUI virtual environment setup complete." "$GREEN"
 fi
 
 # Start ComfyUI server
 cd "$SCRIPT_DIR/ComfyUI"
-if [ -d "venv" ]; then
-    source venv/bin/activate
+if [ -d "../venvs/comfyui_venv" ]; then
+    source ../venvs/comfyui_venv/bin/activate
     start_service "ComfyUI" "python main.py > ../logs/comfyui.log 2>&1" "python.*main.py"
     deactivate
 else
     log "ComfyUI virtual environment not found" "$RED"
     exit 1
 fi
+
 # Download SDXL model if it doesn't exist
 SDXL_MODEL_PATH="$SCRIPT_DIR/ComfyUI/models/checkpoints/sdXL_v10.safetensors"
 if [ ! -f "$SDXL_MODEL_PATH" ]; then

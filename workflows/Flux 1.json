@@ -1,7 +1,7 @@
 {
   "6": {
     "inputs": {
-      "text": "A beautiful taiwanese women, looking at sunset",
+      "text": "A beautiful taiwanese women, looking at sunset, close-up",
       "clip": [
         "11",
         0
@@ -52,7 +52,7 @@
   },
   "11": {
     "inputs": {
-      "clip_name1": "t5xxl_fp16.safetensors",
+      "clip_name1": "t5/t5xxl_fp8_e4m3fn.safetensors",
       "clip_name2": "clip_l.safetensors",
       "type": "flux",
       "device": "default"
@@ -102,7 +102,7 @@
   "17": {
     "inputs": {
       "scheduler": "simple",
-      "steps": 15,
+      "steps": 30,
       "denoise": 1,
       "model": [
         "30",
@@ -132,7 +132,7 @@
   },
   "25": {
     "inputs": {
-      "noise_seed": 1019265594178346
+      "noise_seed": 47743216214744
     },
     "class_type": "RandomNoise",
     "_meta": {
@@ -154,7 +154,7 @@
   },
   "27": {
     "inputs": {
-      "width": 768,
+      "width": 1024,
       "height": 1024,
       "batch_size": 1
     },
@@ -165,7 +165,7 @@
   },
   "30": {
     "inputs": {
-      "unet_name": "flux1-dev-Q2_K.gguf"
+      "unet_name": "FLUX1/flux1-dev-Q8_0.gguf"
     },
     "class_type": "UnetLoaderGGUF",
     "_meta": {
