@@ -58,12 +58,12 @@ fi
 
 # Set up MIDAS Python 3.11 virtual environment if not already set up
 if [ ! -d venvs/midas_venv ]; then
-    echo "Setting up MIDAS virtual environment..."
-    python3 -m venv venvs/midas_venv
+    log "Setting up MIDAS virtual environment..." "$YELLOW"
+    python3.11 -m venv venvs/midas_venv
     source venvs/midas_venv/bin/activate
     pip install -r requirements.txt
     deactivate
-    echo "MIDAS virtual environment setup complete."
+    log "MIDAS virtual environment setup complete." "$GREEN"
 fi
 
 # Set up ComfyUI Python virtual environment if not already set up

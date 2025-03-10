@@ -14,6 +14,7 @@ import atexit
 import base64
 import io
 import configparser
+import time
 
 import gradio as gr
 import ollama
@@ -329,7 +330,8 @@ def get_model_version(model_name):
         "llama3.1": "8b",
         "phi3.5": "latest",
         "mistral": "latest",
-        "codellama": "latest"
+        "codellama": "latest",
+        "deepseek-r1": "7b"
     }
     
     # If model already has a version, return as is
@@ -466,7 +468,7 @@ def generate_response(message, model, chat_history, conv_id, context=None):
             base_model = get_model_version(model)
             system_prompt = DEFAULT_SYSTEM_PROMPT
             temperature = 0.7
-            max_tokens = 4096
+            max_tokens = 8196
             top_p = 0.9
             combined_context = context if context else ""
         
@@ -513,6 +515,8 @@ Please answer the user's question:"""
         # Generate response
         response = ""
         response_lines = []
+        thinking_mode = False
+        final_response = ""
         
         try:
             print(f"Generating response with model: {base_model}")
@@ -539,38 +543,83 @@ Please answer the user's question:"""
                 if chunk['message']['content']:
                     response += chunk['message']['content']
                     response_lines.append(chunk['message']['content'])
+                    
+                    # Check if we're in a thinking model response
+                    if "<think>" in response and not thinking_mode:
+                        thinking_mode = True
+                        # Extract thinking content
+                        thinking_content = response.split("<think>", 1)[1].strip()
+                        current_response = "> **Thinking Process:**\n> \n> " + thinking_content.replace('\n', '\n> ')
+                    elif thinking_mode and "</think>" in response:
+                        # Extract thinking content
+                        thinking_part = response.split("<think>", 1)[1].split("</think>", 1)[0].strip()
+                        # Extract final response after </think> tag
+                        final_part = response.split("</think>", 1)[1].strip()
+                        # Display thinking and final response using markdown quotes for thinking
+                        current_response = "> **Thinking Process:**\n> \n> " + thinking_part.replace('\n', '\n> ') + "\n\n" + final_part
+                        final_response = final_part  # Save the final response
+                    elif thinking_mode:
+                        # Still in thinking mode, update thinking content
+                        thinking_content = response.split("<think>", 1)[1].strip()
+                        current_response = "> **Thinking Process:**\n> \n> " + thinking_content.replace('\n', '\n> ')
+                    else:
+                        # Regular response
+                        current_response = response
+                    
                     # Update chat history with current response
-                    updated_history = chat_history + [(message, response)]
-                    yield "", updated_history, conv_id
+                    updated_history = chat_history + [(message, current_response)]
+                    
+                    yield current_response, updated_history, conv_id
+            
+            # Save the final message to the database once streaming is complete
+            save_message(conv_id, model, "user", message)
+            
+            # For thinking models, save both thinking process and final response in one message
+            if thinking_mode and final_response:
+                # Extract the thinking process
+                thinking_content = response.split("<think>", 1)[1].split("</think>", 1)[0].strip()
+                # Format with markdown quotes for thinking and regular text for response
+                thinking_formatted = thinking_content.replace('\n', '\n> ')
+                combined_response = f"> **Thinking Process:**\n> \n> {thinking_formatted}\n\n{final_response}"
+                # Save as a single assistant message
+                save_message(conv_id, model, "assistant", combined_response)
+            else:
+                # Save regular response
+                save_message(conv_id, model, "assistant", response)
         except Exception as e:
             print(f"Error during response generation: {e}")
             error_msg = "I apologize, but I encountered an error while generating the response. Please try again."
             updated_history = chat_history + [(message, error_msg)]
-            yield "", updated_history, conv_id
+            yield error_msg, updated_history, conv_id
             return
         
         # Save final message pair
-        save_message(conv_id, model, "user", message)
-        save_message(conv_id, model, "assistant", response)
+        # For thinking models, preserve the thinking process in the final response
+        if thinking_mode and final_response:
+            thinking_formatted = thinking_content.replace('\n', '\n> ')
+            combined_response = f"> **Thinking Process:**\n> \n> {thinking_formatted}\n\n{final_response}"
+            response = combined_response
+
+        # Generate title for the conversation if it's the first message
+        conn = sqlite3.connect('conversations.db')
+        c = conn.cursor()
+        c.execute('SELECT title FROM conversations WHERE id = ?', (conv_id,))
+        current_title = c.fetchone()
+        conn.close()
         
-        # Generate title for first message
-        if is_first_message:
+        # Only generate a title if this is the first message and the current title is empty or "Untitled Conversation"
+        if is_first_message and current_title and (not current_title[0] or current_title[0].strip() == "Untitled Conversation"):
             title = generate_conversation_title(message, response, model)
             update_conversation_title(conv_id, title)
-        
-        # Update conversation model if using a bot
-        if bot_config:
             update_conversation_model(model, conv_id)
-        
         updated_history = chat_history + [(message, response)]
-        yield "", updated_history, conv_id
-        
+        yield response, updated_history, conv_id
     except Exception as e:
         print(f"Error generating response: {e}")
         traceback.print_exc()
         error_msg = "I apologize, but I encountered an error while processing your request."
         updated_history = chat_history + [(message, error_msg)]
-        yield "", updated_history, conv_id
+        yield error_msg, updated_history, conv_id
 
 def save_message(conv_id, model, role, content, full_history=None):
     """
@@ -626,13 +675,64 @@ def save_message(conv_id, model, role, content, full_history=None):
         conn.close()
 
 def load_chat_history(model_name):
-    conn = sqlite3.connect('conversations.db')
-    c = conn.cursor()
-    c.execute('''SELECT content FROM messages 
-                 WHERE model = ? ORDER BY timestamp''', (model_name,))
-    history = c.fetchall()
-    conn.close()
-    return history
+    """
+    Load chat history for a specific model
+    
+    Args:
+        model_name (str): Model name to filter messages
+    
+    Returns:
+        list: List of message contents
+    """
+    try:
+        conn = sqlite3.connect('conversations.db')
+        c = conn.cursor()
+        
+        # Get conversation IDs for this model
+        c.execute('''SELECT DISTINCT conversation_id FROM messages 
+                     WHERE model = ?''', (model_name,))
+        
+        conversation_ids = c.fetchall()
+        history = []
+        
+        for conv_id in conversation_ids:
+            conv_id = conv_id[0]
+            
+            # Get messages for this conversation ordered by timestamp
+            c.execute('''SELECT content, role FROM messages 
+                         WHERE model = ? AND conversation_id = ? 
+                         ORDER BY timestamp''', (model_name, conv_id))
+            
+            results = c.fetchall()
+            
+            # Process results to include thinking process for models that support it
+            i = 0
+            while i < len(results):
+                content, role = results[i]
+                
+                if role == "user":
+                    # For user messages, check what follows
+                    user_content = content
+                    
+                    # Check if we have an assistant response
+                    if i + 1 < len(results) and results[i + 1][1] == "assistant":
+                        # Regular user -> assistant sequence
+                        history.append((user_content, results[i + 1][0]))
+                        i += 2
+                    else:
+                        # User message with no response yet
+                        history.append((user_content, None))
+                        i += 1
+                else:
+                    # Skip any other messages not handled above
+                    i += 1
+        
+        conn.close()
+        return history
+    except Exception as e:
+        print(f"Error loading chat history: {e}")
+        traceback.print_exc()
+        return []
 
 def create_conversation(initial_message, model="llama3.1:8b"):
     """
@@ -687,6 +787,21 @@ def generate_conversation_title(message, response, model):
         str: Generated title
     """
     try:
+        # Get the current title if it exists
+        if 'conv_id' in locals() or 'conv_id' in globals():
+            conn = sqlite3.connect('conversations.db')
+            c = conn.cursor()
+            c.execute('SELECT title FROM conversations WHERE id = ?', (conv_id,))
+            result = c.fetchone()
+            conn.close()
+            
+            # If title already exists and is not "Untitled Conversation", return it
+            if result and result[0] and result[0].strip() != "Untitled Conversation":
+                return result[0]
+        
+        # Get the default model for title generation
+        default_model = get_default_model()
+        
         # Special handling for image generation conversations
         if model == "SDXL" or "image" in message.lower():
             import re
@@ -696,25 +811,15 @@ def generate_conversation_title(message, response, model):
             clean_message = re.sub(r'^(generate|create|make)\s*(an?\s*)?image\s*(of|with)?', '', clean_message).strip()
             clean_message = re.sub(r'--\w+\s*[^\s]+', '', clean_message).strip()
             
-            # Use the default model to generate a more descriptive title
-            default_model = get_default_model()
-            
             # Prepare messages for title generation
             messages = [
                 {
                     "role": "system",
-                    "content": """You are an expert at creating concise, informative titles. 
-                    Given an image generation prompt, create a title that:
-                    1. Captures the essence of the image
-                    2. Is no more than 5 words long
-                    3. Highlights the most important or unique aspect
-                    4. Uses descriptive and engaging language
-                    
-                    Return ONLY the title, nothing else."""
+                    "content": "Create a short, concise title (3-4 words) for this image prompt. Return ONLY the title."
                 },
                 {
                     "role": "user",
-                    "content": f"Image generation prompt: {clean_message}"
+                    "content": f"Image prompt: {clean_message}"
                 }
             ]
             
@@ -726,67 +831,75 @@ def generate_conversation_title(message, response, model):
                 options={
                     "temperature": 0.7,
                     "top_p": 0.9,
-                    "num_predict": 50
+                    "num_predict": 30
                 }
             ):
                 if chunk['message']['content']:
-                    title += chunk['message']['content']
+                    content = chunk['message']['content']
+                    if "<think>" in content:
+                        content = content.split("<think>")[0].strip()
+                    title += content
             
             # Clean up title
             title = title.strip().strip('"').strip().title()
             
             # Fallback and truncate
             if not title:
-                # Extract key words if AI fails
                 words = clean_message.split()
                 title = ' '.join(words[:3]).title()
             
             # Ensure title is not too long
-            return title[:40] if title else "Image Generation"
-        
-        # Check if the model is actually a bot name
-        bot_config = get_bot_by_name(model)
-        if bot_config:
-            # Use the bot's base model instead
-            model = bot_config['base_model']
-        
-        # Use the model to generate a title for other conversations
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant. Generate a brief, descriptive title (maximum 6 words) for a conversation based on the user's message and your response. Return ONLY the title, nothing else."
-            },
-            {
-                "role": "user",
-                "content": f"User's message: {message}\nYour response: {response}"
-            }
-        ]
-        
-        title = ""
-        for chunk in ollama_client.chat(
-            model=get_model_version(model),
-            messages=messages,
-            stream=True,
-            options={
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "num_predict": 50
-            }
-        ):
-            if chunk['message']['content']:
-                title += chunk['message']['content']
-        
-        # Clean up title
-        title = title.strip().strip('"').strip()
-        if not title:
-            title = "Untitled Conversation"
+            title = title[:30] if title else "Image Generation"
+        else:
+            # For all other conversation types
+            system_prompt = "Create a very short, concise title (3-4 words) for this conversation. Return ONLY the title."
+            
+            # Use the default model to generate a title
+            messages = [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": f"User: {message}\nAssistant: {response}"
+                }
+            ]
+            
+            title = ""
+            for chunk in ollama_client.chat(
+                model=get_model_version(default_model),
+                messages=messages,
+                stream=True,
+                options={
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "num_predict": 30
+                }
+            ):
+                if chunk['message']['content']:
+                    content = chunk['message']['content']
+                    if "<think>" in content:
+                        content = content.split("<think>")[0].strip()
+                    title += content
+            
+            # Clean up title and ensure it's concise
+            title = title.strip().strip('"').strip().title()
+            
+            # Limit to 6 words maximum
+            words = title.split()
+            if len(words) > 6:
+                title = ' '.join(words[:6])
+            
+            # Fallback
+            if not title:
+                title = "Untitled Conversation"
         
         return title
-        
-    except Exception as e:
-        print(f"Error generating conversation title: {e}")
-        traceback.print_exc()
-        return "Untitled Conversation"
+    finally:
+        # Update the conversation title in the database
+        if 'conv_id' in locals() or 'conv_id' in globals():
+            update_conversation_title(conv_id, title)
 
 def update_conversation_title(conv_id, title):
     """
@@ -809,7 +922,6 @@ def update_conversation_title(conv_id, title):
         conn.close()
     except Exception as e:
         print(f"Error updating conversation title: {e}")
-
 def delete_conversation(conv_id):
     """
     Delete a specific conversation and its associated messages
@@ -2825,9 +2937,10 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             chatbot = gr.Chatbot(
                 label="Conversation", 
                 show_label=False, 
-                height=500,
+                height=600,
                 layout="bubble",
-                bubble_full_width=False
+                bubble_full_width=False,
+                value=[("Welcome to MIDAS 2.0, press New Chat and select a model to start chatting!", None)]
             )
             
             # Message input area with integrated controls
@@ -3346,9 +3459,17 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 # Save the image
                 image.save(image_filename)
                 
-                # Generate title using the default model
-                title = generate_conversation_title(message, "", get_default_model())
-                update_conversation_title(conv_id, title)
+                # Check if this is a new conversation with default title
+                conn = sqlite3.connect('conversations.db')
+                c = conn.cursor()
+                c.execute('SELECT title FROM conversations WHERE id = ?', (conv_id,))
+                current_title = c.fetchone()
+                conn.close()
+                
+                if current_title and (not current_title[0] or current_title[0].strip() == "Untitled Conversation"):
+                    # Generate title using the default model
+                    title = generate_conversation_title(message, "", get_default_model())
+                    update_conversation_title(conv_id, title)
                 
                 # Update history with the actual image
                 history[-1] = (message, f"![Generated Image](/gradio_api/file={image_filename})")
@@ -3385,11 +3506,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 history.append((message, ""))
                 save_message(conv_id, model_name, "user", message)
                 
-                # Generate title if it's a new conversation
-                if get_chat_title(conv_id) == "Untitled Conversation":
-                    title = generate_conversation_title(message, "", model_name)
-                    update_conversation_title(conv_id, title)
-                
                 yield history, "", get_chat_title(conv_id), format_conversation_list()
                 
                 # Stream the response
@@ -3402,14 +3518,26 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                             full_response = updated_history[-1][1]
                             history[-1] = (message, full_response)
                             yield history, "", get_chat_title(current_conv_id), format_conversation_list()
-                
+                    elif response and isinstance(response, str):
+                        # Yield thinking process directly
+                        history[-1] = (message, response)
+                        yield history, "", get_chat_title(conv_id), format_conversation_list()
+            
                 # Save the final response
                 save_message(conv_id, model_name, "assistant", full_response)
                 
-                # Update title if still untitled
-                if get_chat_title(conv_id) == "Untitled Conversation":
+                # Check if this is a new conversation with default title
+                conn = sqlite3.connect('conversations.db')
+                c = conn.cursor()
+                c.execute('SELECT title FROM conversations WHERE id = ?', (conv_id,))
+                current_title = c.fetchone()
+                conn.close()
+                
+                if current_title and (not current_title[0] or current_title[0].strip() == "Untitled Conversation"):
+                    # Generate title using the default model
                     title = generate_conversation_title(message, full_response, model_name)
                     update_conversation_title(conv_id, title)
+                    update_conversation_model(model_name, conv_id)
                 
                 yield history, "", get_chat_title(conv_id), format_conversation_list()
                 
@@ -3420,7 +3548,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                 history.append((message, error_msg))
                 save_message(conv_id, model_name, "assistant", error_msg)
                 yield history, "", get_chat_title(conv_id), format_conversation_list()
-                
         
     # Add global variable to track generation state
     generation_active = False
