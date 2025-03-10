@@ -61,6 +61,11 @@ if not exist ComfyUI (
     echo [%date% %time%] Downloading ComfyUI...
     git clone https://github.com/comfyanonymous/ComfyUI.git
     echo [%date% %time%] ComfyUI download complete.
+    
+    echo [%date% %time%] Installing ComfyUI Manager...
+    if not exist ComfyUI\custom_nodes mkdir ComfyUI\custom_nodes
+    git clone https://github.com/ltdrdata/ComfyUI-Manager.git ComfyUI\custom_nodes\ComfyUI-Manager
+    echo [%date% %time%] ComfyUI Manager installation complete.
 )
 
 REM Set up MIDAS Python 3.11 virtual environment if not already set up
