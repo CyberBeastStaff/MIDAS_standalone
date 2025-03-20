@@ -1,0 +1,7 @@
+This is a test document for checking the RAG functionality.
+It contains some sample text that we can query later.
+
+MIDAS standalone app is a powerful tool that combines chat capabilities with RAG functionality.
+Users can upload documents and have them processed for use in conversations.
+
+Files are stored in a docs folder and embeddings are created to enable semantic search.

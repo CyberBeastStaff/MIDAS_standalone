@@ -38,9 +38,9 @@ env/
 *.log
 logs/
 
-# Databases are now included
-# *.db
-# *.sqlite3
+# Databases
+*.db
+*.sqlite3
 
 # ComfyUI
 ComfyUI/

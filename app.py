@@ -15,14 +15,93 @@ import base64
 import io
 import configparser
 import time
+import glob
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
 
 import gradio as gr
 import ollama
 from flask import Flask
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from langchain.embeddings.base import Embeddings
+
+class TfidfEmbeddings(Embeddings):
+    """
+    A simple embedding class that uses TF-IDF vectorization from scikit-learn.
+    Implements the Embeddings interface for compatibility with LangChain.
+    """
+    
+    def __init__(self, **kwargs):
+        """Initialize the TF-IDF vectorizer."""
+        self.vectorizer = TfidfVectorizer(
+            lowercase=True,
+            max_features=354,  # Set to match the dimensionality of HuggingFaceEmbeddings
+            stop_words='english'
+        )
+        self.fitted = False
+        self.documents = []
+        self.output_dim = 354  # Fixed dimension to match existing embeddings
+        
+    def _fit_vectorizer(self, texts):
+        """Fit the vectorizer on the provided texts."""
+        if not self.fitted:
+            self.vectorizer.fit(texts)
+            self.fitted = True
+            self.documents = texts
+    
+    def embed_documents(self, texts):
+        """
+        Embed a list of documents using TF-IDF.
+        
+        Args:
+            texts: List of strings to embed
+            
+        Returns:
+            List of embeddings, one for each text
+        """
+        # Ensure vectorizer is fitted
+        all_texts = self.documents + texts if self.fitted else texts
+        self._fit_vectorizer(all_texts)
+        
+        # Transform texts to TF-IDF vectors
+        tfidf_matrix = self.vectorizer.transform(texts)
+        
+        # Convert sparse matrix to dense and normalize
+        embeddings = []
+        for i in range(tfidf_matrix.shape[0]):
+            vec = tfidf_matrix[i].toarray()[0]
+            
+            # Ensure the vector has exactly the required dimensions
+            if len(vec) < self.output_dim:
+                # Pad with zeros if needed
+                vec = np.pad(vec, (0, self.output_dim - len(vec)))
+            elif len(vec) > self.output_dim:
+                # Truncate if needed
+                vec = vec[:self.output_dim]
+                
+            # Normalize to unit length
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            embeddings.append(vec.tolist())
+        
+        return embeddings
+    
+    def embed_query(self, text):
+        """
+        Embed a query using TF-IDF.
+        
+        Args:
+            text: String to embed
+            
+        Returns:
+            Embedding for the text
+        """
+        return self.embed_documents([text])[0]
 
 # Load configuration
 config = configparser.ConfigParser()
@@ -240,6 +319,9 @@ def get_bot_configurations():
     """
     Retrieve all bot configurations
     
+    Args:
+        None
+    
     Returns:
         list: List of dictionaries containing bot configurations
     """
@@ -267,6 +349,9 @@ def get_bot_configurations():
 def get_available_models():
     """
     Get list of available models from Ollama or configuration file
+    
+    Args:
+        None
     
     Returns:
         list: List of model names without version suffixes
@@ -349,6 +434,9 @@ def get_available_ollama_models():
     """
     Retrieve detailed list of available Ollama models
     
+    Args:
+        None
+    
     Returns:
         list: List of dictionaries containing model details
     """
@@ -408,6 +496,9 @@ def get_bot_by_name(bot_name):
 def get_bot_names():
     """
     Retrieve names of all saved bots
+    
+    Args:
+        None
     
     Returns:
         list: List of bot names
@@ -988,6 +1079,9 @@ def get_conversations():
     """
     Retrieve conversations for Gradio DataFrame display
     
+    Args:
+        None
+    
     Returns:
         pandas.DataFrame: DataFrame with only title column
     """
@@ -1011,6 +1105,9 @@ def get_conversations():
 def get_conversation_list():
     """
     Retrieve a list of all conversations with detailed information
+    
+    Args:
+        None
     
     Returns:
         list: List of dictionaries containing conversation details
@@ -1408,6 +1505,9 @@ def get_default_model():
     """
     Retrieve the default fallback model
     
+    Args:
+        None
+    
     Returns:
         str: Name of the default model
     """
@@ -1472,6 +1572,9 @@ def load_ollama_models():
     """
     Load and return available Ollama models for the dialog
     
+    Args:
+        None
+    
     Returns:
         pandas.DataFrame: DataFrame with available models
     """
@@ -1495,6 +1598,9 @@ def load_ollama_models():
 def open_manage_bots_dialog():
     """
     Open the manage bots dialog and prepare its contents
+    
+    Args:
+        None
     
     Returns:
         tuple: Dialog visibility, existing bots list, bot name dropdown, base model dropdown, save status
@@ -1630,8 +1736,11 @@ def get_existing_bots_dataframe():
     """
     Retrieve existing bots as a DataFrame
     
+    Args:
+        None
+    
     Returns:
-        pandas.DataFrame: Dataframe of existing bots
+        pd.DataFrame: DataFrame containing bot configurations
     """
     try:
         conn = sqlite3.connect('bots.db')
@@ -1655,6 +1764,9 @@ def get_existing_bots_dataframe():
 def get_existing_bots():
     """
     Retrieve list of existing bot names
+    
+    Args:
+        None
     
     Returns:
         list: Names of existing bots
@@ -1829,7 +1941,7 @@ def process_document(file_path, original_name, conversation_id=None):
         elif file_ext == '.txt':
             loader = TextLoader(permanent_path)
             print("Using text loader")
-        elif file_ext in ['.doc', '.docx']:
+        elif file_ext == '.doc':
             loader = Docx2txtLoader(permanent_path)
             print("Using Word document loader")
         else:
@@ -1847,17 +1959,22 @@ def process_document(file_path, original_name, conversation_id=None):
         chunks = text_splitter.split_documents(documents)
         print(f"Document split into {len(chunks)} chunks")
         
-        # Create embeddings directory
+        # Create a new embeddings directory with a unique ID
         embeddings_dir = os.path.join(docs_dir, "embeddings", str(uuid.uuid4()))
+        
+        # Delete the directory if it already exists (should not happen with UUID)
+        if os.path.exists(embeddings_dir):
+            shutil.rmtree(embeddings_dir)
+            
+        # Create the directory
         os.makedirs(embeddings_dir, exist_ok=True)
         print(f"Created embeddings directory: {embeddings_dir}")
         
-        # Initialize embeddings model
-        print("Initializing embeddings model...")
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
+        # Initialize embeddings model using TfidfEmbeddings
+        print("Initializing TF-IDF embeddings model...")
+        # Extract text from chunks for fitting the TF-IDF vectorizer
+        chunk_texts = [chunk.page_content for chunk in chunks]
+        embeddings = TfidfEmbeddings()
         
         # Generate unique IDs for each chunk
         ids = [str(uuid.uuid4()) for _ in range(len(chunks))]
@@ -1947,17 +2064,22 @@ def handle_file_upload(file_obj, conversation_id=None):
         conn = sqlite3.connect('conversations.db')
         c = conn.cursor()
         
-        # Directly query for the conversation ID by title
-        c.execute('''SELECT id FROM conversations 
-                     WHERE title = ? 
-                     ORDER BY created_at DESC 
-                     LIMIT 1''', ("New conversation with document: " + original_name,))
+        # Check if the conversation exists by ID if ID is provided
+        if conversation_id:
+            c.execute('SELECT id FROM conversations WHERE id = ?', (conversation_id,))
+            conv_result = c.fetchone()
+        else:
+            # This case should not happen as we create a conversation if none exists above
+            c.execute('''SELECT id FROM conversations 
+                         WHERE title = ? 
+                         ORDER BY created_at DESC 
+                         LIMIT 1''', ("New conversation with document: " + original_name,))
+            conv_result = c.fetchone()
         
-        conv_result = c.fetchone()
         conn.close()
         
         if not conv_result:
-            print(f"No conversation found with title: New conversation with document: {original_name}")
+            print(f"No conversation found with ID: {conversation_id}")
             return f"Error: Invalid conversation ID", "", False, None
         print(f"Verified conversation {conversation_id} exists")
         
@@ -2007,29 +2129,92 @@ def get_relevant_context(query, conversation_id=None, top_k=3):
             print("No documents found")
             return ""
         
-        # Initialize embeddings model
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
+        # Initialize TF-IDF embeddings model
+        print("Initializing TF-IDF embeddings model...")
+        embeddings = TfidfEmbeddings()
         
         # Combine results from all documents
         all_results = []
         for path in embedding_paths:
             print(f"Processing embeddings from: {path[0]}")
-            if os.path.exists(path[0]):
+            if not os.path.exists(path[0]):
+                print(f"Warning: Embedding path does not exist: {path[0]}")
+                continue
+                
+            try:
+                # Use Chroma with TF-IDF embeddings
                 vectordb = Chroma(
                     persist_directory=path[0],
                     embedding_function=embeddings
                 )
                 results = vectordb.similarity_search(query, k=top_k)
-                print(f"Found {len(results)} relevant chunks")
+                print(f"Found {len(results)} relevant chunks using TF-IDF search")
                 all_results.extend(results)
-            else:
-                print(f"Warning: Embedding path does not exist: {path[0]}")
+            except Exception as e:
+                print(f"Error using TF-IDF search: {e}")
+                
+                # Fallback to keyword-based search if TF-IDF fails
+                print("Falling back to keyword-based search")
+                
+                # Try to load the collection files directly
+                try:
+                    # Look for document chunks in the collection directory
+                    collection_dir = os.path.join(path[0], "chroma-embeddings.parquet")
+                    if os.path.exists(collection_dir):
+                        import pandas as pd
+                        # Try to load the parquet file with document contents
+                        df = pd.read_parquet(collection_dir)
+                        if 'document' in df.columns:
+                            # Simple keyword matching
+                            query_terms = query.lower().split()
+                            for _, row in df.iterrows():
+                                content = row['document'].lower()
+                                # Calculate a simple relevance score based on term frequency
+                                score = sum(1 for term in query_terms if term in content)
+                                if score > 0:
+                                    # Create a Document object with the content and metadata
+                                    doc = Document(
+                                        page_content=row['document'],
+                                        metadata={'score': score, 'source': 'Unknown document'}
+                                    )
+                                    all_results.append(doc)
+                            print(f"Found {len(all_results)} chunks using keyword search")
+                    else:
+                        # Try to find JSON files in the embedding directory
+                        json_files = glob.glob(os.path.join(path[0], "chunk_*.json"))
+                        if json_files:
+                            print(f"Found {len(json_files)} JSON chunk files")
+                            
+                            # Load all chunks from JSON files
+                            for json_file in json_files:
+                                try:
+                                    with open(json_file, 'r', encoding='utf-8') as f:
+                                        chunk_data = json.load(f)
+                                        content = chunk_data.get('page_content', '')
+                                        # Simple keyword matching
+                                        query_terms = query.lower().split()
+                                        score = sum(1 for term in query_terms if term in content.lower())
+                                        if score > 0:
+                                            # Create a Document object with the content and metadata
+                                            doc = Document(
+                                                page_content=content,
+                                                metadata={
+                                                    'score': score,
+                                                    'source': chunk_data.get('source', 'Unknown document')
+                                                }
+                                            )
+                                            all_results.append(doc)
+                                except Exception as json_error:
+                                    print(f"Error loading chunk from {json_file}: {json_error}")
+                except Exception as fallback_error:
+                    print(f"Error in fallback search: {fallback_error}")
         
         # Sort by relevance and get top results
-        all_results = sorted(all_results, key=lambda x: x.metadata.get('score', 0), reverse=True)[:top_k]
+        if all_results:  # Check if list is not empty before accessing elements
+            all_results = sorted(all_results, key=lambda x: x.metadata.get('score', 0), reverse=True)[:top_k]
+        else:
+            print("No results found from any document")
+            return ""
         
         # Format context
         if all_results:
@@ -2121,18 +2306,56 @@ def process_bot_document(file_path, original_name, bot_id):
         # Generate embeddings
         embeddings_dir = os.path.join('bot_embeddings')
         os.makedirs(embeddings_dir, exist_ok=True)
-        embedding_path = os.path.join(embeddings_dir, f"{os.path.splitext(unique_filename)[0]}")
         
-        # Save chunks to vector store
-        embedding_function = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
-        Chroma.from_documents(
-            documents=chunks,
-            embedding=embedding_function,
-            persist_directory=embedding_path
-        )
+        # Create a unique embedding path with UUID to avoid conflicts
+        unique_id = str(uuid.uuid4())
+        embedding_path = os.path.join(embeddings_dir, unique_id)
+        
+        # Ensure the directory is fresh
+        if os.path.exists(embedding_path):
+            shutil.rmtree(embedding_path)
+        os.makedirs(embedding_path, exist_ok=True)
+        
+        # Add source metadata to chunks
+        for chunk in chunks:
+            if 'source' not in chunk.metadata:
+                chunk.metadata['source'] = original_name
+        
+        # Use TfidfEmbeddings instead of HuggingFaceEmbeddings
+        print("Initializing TF-IDF embeddings model...")
+        embedding_function = TfidfEmbeddings()
+        
+        # Generate unique IDs for each chunk
+        ids = [str(uuid.uuid4()) for _ in range(len(chunks))]
+        
+        try:
+            # Create and persist vector store
+            print("Creating vector store...")
+            vectordb = Chroma.from_documents(
+                documents=chunks,
+                embedding=embedding_function,
+                persist_directory=embedding_path,
+                ids=ids
+            )
+            vectordb.persist()
+            print("Vector store created and persisted")
+        except Exception as e:
+            print(f"Error creating vector store: {e}")
+            print("Falling back to saving chunks as JSON files")
+            
+            # Save chunks as JSON files as fallback
+            for i, chunk in enumerate(chunks):
+                chunk_file = os.path.join(embedding_path, f"chunk_{i}.json")
+                try:
+                    with open(chunk_file, 'w', encoding='utf-8') as f:
+                        json_data = {
+                            'page_content': chunk.page_content,
+                            'metadata': chunk.metadata,
+                            'source': chunk.metadata.get('source', original_name)
+                        }
+                        json.dump(json_data, f, ensure_ascii=False, indent=2)
+                except Exception as json_error:
+                    print(f"Error saving chunk to JSON: {json_error}")
         
         # Save document info to database
         conn = sqlite3.connect('bots.db')
@@ -2165,27 +2388,37 @@ def handle_bot_file_upload(file_path, bot_name_dropdown):
         str: Status message
     """
     try:
-        if not file_path or not bot_name_dropdown or bot_name_dropdown == 'New Bot':
-            return "Please select a bot before uploading documents"
+        if not file_path:
+            return "No file uploaded"
         
         # Get bot ID
         conn = sqlite3.connect('bots.db')
         cursor = conn.cursor()
         cursor.execute('SELECT id FROM bots WHERE name = ?', (bot_name_dropdown,))
         result = cursor.fetchone()
-        conn.close()
         
         if not result:
-            return "Bot not found"
+            # Create new bot if it doesn't exist
+            cursor.execute('INSERT INTO bots (name) VALUES (?)', (bot_name_dropdown,))
+            bot_id = cursor.lastrowid
+            conn.commit()
+        else:
+            bot_id = result[0]
         
-        bot_id = result[0]
+        conn.close()
+        
+        # Process the document
         success, message = process_bot_document(file_path, os.path.basename(file_path), bot_id)
-        return message
+        
+        if success:
+            return message
+        else:
+            return f"Error: {message}"
         
     except Exception as e:
-        print(f"Error handling file upload: {e}")
+        print(f"Error handling bot file upload: {e}")
         traceback.print_exc()
-        return f"Error uploading file: {str(e)}"
+        return f"Error: {str(e)}"
 
 def get_bot_documents(bot_name):
     """
@@ -2251,16 +2484,15 @@ def get_bot_knowledge_context(bot_name, query):
         if not embedding_paths:
             return ""
         
-        # Combine results from all document embeddings
-        embedding_function = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
+        # Initialize TF-IDF embeddings model
+        print("Initializing TF-IDF embeddings model for bot knowledge...")
+        embedding_function = TfidfEmbeddings()
         
-        # Initialize vector store
+        # Search for relevant chunks across all documents
         all_contexts = []
         for path in embedding_paths:
             try:
+                # Use Chroma with TF-IDF embeddings
                 db = Chroma(
                     persist_directory=path[0],
                     embedding_function=embedding_function
@@ -2268,8 +2500,72 @@ def get_bot_knowledge_context(bot_name, query):
                 results = db.similarity_search(query, k=2)
                 for doc in results:
                     all_contexts.append(doc.page_content)
+                print(f"Found {len(results)} relevant chunks using TF-IDF search")
             except Exception as e:
-                print(f"Error searching document {path}: {e}")
+                print(f"Error using TF-IDF search for bot knowledge: {e}")
+                
+                # Fallback to keyword-based search if TF-IDF fails
+                print("Falling back to keyword-based search for bot knowledge")
+                
+                try:
+                    # Look for document chunks in the collection directory
+                    collection_dir = os.path.join(path[0], "chroma-embeddings.parquet")
+                    if os.path.exists(collection_dir):
+                        import pandas as pd
+                        # Try to load the parquet file with document contents
+                        df = pd.read_parquet(collection_dir)
+                        if 'document' in df.columns:
+                            # Simple keyword matching
+                            query_terms = query.lower().split()
+                            matched_chunks = []
+                            
+                            for _, row in df.iterrows():
+                                content = row['document'].lower()
+                                # Calculate a simple relevance score based on term frequency
+                                score = sum(1 for term in query_terms if term in content)
+                                if score > 0:
+                                    matched_chunks.append((row['document'], score))
+                            
+                            # Sort by score and take top 2
+                            matched_chunks.sort(key=lambda x: x[1], reverse=True)
+                            for chunk, _ in matched_chunks[:2]:
+                                all_contexts.append(chunk)
+                                
+                            print(f"Found {len(matched_chunks)} chunks using keyword search")
+                    else:
+                        # Try to find JSON files in the embedding directory
+                        json_files = glob.glob(os.path.join(path[0], "chunk_*.json"))
+                        if json_files:
+                            print(f"Found {len(json_files)} JSON chunk files")
+                            
+                            # Load all chunks from JSON files
+                            chunks = []
+                            for json_file in json_files:
+                                try:
+                                    with open(json_file, 'r', encoding='utf-8') as f:
+                                        chunk_data = json.load(f)
+                                        chunks.append(chunk_data)
+                                except Exception as json_error:
+                                    print(f"Error loading chunk from {json_file}: {json_error}")
+                            
+                            # Simple keyword matching
+                            query_terms = query.lower().split()
+                            matched_chunks = []
+                            for chunk in chunks:
+                                content = chunk.get('page_content', '').lower()
+                                # Calculate a simple relevance score based on term frequency
+                                score = sum(1 for term in query_terms if term in content)
+                                if score > 0:
+                                    matched_chunks.append((chunk.get('page_content', ''), score))
+                            
+                            # Sort by score and take top 2
+                            matched_chunks.sort(key=lambda x: x[1], reverse=True)
+                            for chunk, _ in matched_chunks[:2]:
+                                all_contexts.append(chunk)
+                                
+                            print(f"Found {len(matched_chunks)} chunks using keyword search")
+                except Exception as fallback_error:
+                    print(f"Error in fallback search for bot knowledge: {fallback_error}")
                 continue
         
         return "\n\n".join(all_contexts) if all_contexts else ""
@@ -2281,6 +2577,9 @@ def get_bot_knowledge_context(bot_name, query):
 def load_existing_bots():
     """
     Load existing bots from the database into a DataFrame
+    
+    Args:
+        None
     
     Returns:
         pd.DataFrame: DataFrame containing bot configurations
@@ -2475,6 +2774,9 @@ def get_available_workflows():
     """
     Get list of available workflows from the workflows directory
     
+    Args:
+        None
+    
     Returns:
         list: List of workflow names without file extensions
     """
@@ -2494,6 +2796,9 @@ def get_available_workflows():
 def get_all_models_and_workflows():
     """
     Get combined list of models, bots, and workflows for the model dropdown
+    
+    Args:
+        None
     
     Returns:
         list: Combined list of models, bots, and workflows
@@ -3858,7 +4163,7 @@ temp_documents = {}
 
 gr.HTML(f"""
     <style>
-        /* Minimalistic and Round Scrollbar Styling */
+        /* Minimalistic and Round Scrollbar Styling - Global Styles */
         * {{
             scrollbar-width: thin;  /* For Firefox */
             scrollbar-color: rgba(128, 128, 128, 0.5) transparent;  /* For Firefox */
@@ -3890,8 +4195,31 @@ gr.HTML(f"""
         #conversations_list,
         .gradio-container .chatbot,
         .gradio-container .upload-container {{
-            scrollbar-width: thin;
-            scrollbar-color: rgba(128, 128, 128, 0.5) transparent;
+            scrollbar-width: thin !important;
+            scrollbar-color: rgba(128, 128, 128, 0.5) transparent !important;
+            -ms-overflow-style: auto !important; /* Show scrollbar in Edge */
+        }}
+        
+        /* Override any scrollbar hiding for these elements */
+        #conversations_list::-webkit-scrollbar,
+        .gradio-container .chatbot::-webkit-scrollbar,
+        .gradio-container .upload-container::-webkit-scrollbar {{
+            display: block !important;
+            width: 8px !important;
+        }}
+        
+        /* Specific exception for conversation list if needed */
+        #conv_list > div {{
+            scrollbar-width: thin !important;
+            -ms-overflow-style: auto !important;
+            height: calc(100vh - 370px) !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+        }}
+        
+        #conv_list > div::-webkit-scrollbar {{
+            display: block !important;
+            width: 8px !important;
         }}
     </style>
 """)

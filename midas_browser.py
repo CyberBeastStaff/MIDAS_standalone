@@ -204,10 +204,58 @@ class MIDASBrowser(QWebEngineView):
         
         # Show loading screen initially
         self.setHtml(LOADING_HTML)
+        
+        # Setup the page to inject custom CSS for scrollbars
+        self.loadFinished.connect(self.on_load_finished)
+        
+        # Store the scrollbar CSS to inject
+        self.scrollbar_css = """
+        /* Minimalistic and Round Scrollbar Styling - Global Styles */
+        * {
+            scrollbar-width: thin !important;  /* For Firefox */
+            scrollbar-color: rgba(128, 128, 128, 0.5) transparent !important;  /* For Firefox */
+        }
+
+        /* Webkit (Chrome, Safari, newer versions of Opera) */
+        *::-webkit-scrollbar {
+            width: 8px !important;  /* Thin scrollbar */
+            height: 8px !important;  /* Horizontal scrollbar */
+            display: block !important;
+        }
+
+        *::-webkit-scrollbar-track {
+            background: transparent !important;  /* Transparent track */
+            border-radius: 10px !important;
+        }
+
+        *::-webkit-scrollbar-thumb {
+            background-color: rgba(128, 128, 128, 0.5) !important;  /* Semi-transparent gray */
+            border-radius: 10px !important;  /* Fully rounded scrollbar */
+            border: 2px solid transparent !important;  /* Creates a slight padding effect */
+            background-clip: content-box !important;  /* Ensures border doesn't affect size */
+        }
+
+        *::-webkit-scrollbar-thumb:hover {
+            background-color: rgba(128, 128, 128, 0.7) !important;  /* Slightly darker on hover */
+        }
+        """
 
     def load_app(self):
         # Services are ready, load the application
         self.load(QUrl('http://127.0.0.1:7860'))
+        
+    def on_load_finished(self, ok):
+        if ok:
+            # Inject custom CSS for scrollbars
+            js = f"""
+            (function() {{
+                const style = document.createElement('style');
+                style.textContent = `{self.scrollbar_css}`;
+                document.head.appendChild(style);
+                console.log('MIDAS Browser: Custom scrollbar styling applied');
+            }})();
+            """
+            self.page().runJavaScript(js)
 
 def check_first_time_run():
     """Check if this is the first time running the application"""
